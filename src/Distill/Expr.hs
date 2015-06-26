@@ -8,6 +8,8 @@ import Control.Monad.Reader
 import Control.Monad.State
 import Data.List ((\\), union)
 
+import Distill.SExpr
+
 -- | Dependently-typed lambda calculus expressions ranging over b, the type of
 -- binders.
 data Expr' b
@@ -25,16 +27,6 @@ data Expr' b
 -- | A type is an ordinary expression, however a different name is typically
 -- used for clarity's sake.
 type Type' = Expr'
-
--- | Source location information, mainly used for helpful error messages.
-data SourceLoc = SourceLoc
-    { sourceFile        :: String
-    , sourceStartCol    :: Int
-    , sourceStartLine   :: Int
-    , sourceEndCol      :: Int
-    , sourceEndLine     :: Int
-    , sourceText        :: String
-    }
 
 -- | The monad used for type checking. Includes:
 --
@@ -237,3 +229,73 @@ subst z p = \case
     AnnotSource m source     -> AnnotSource (subst z p m) source
   where
     bomb = error "Substituting through non-unique identifiers."
+
+-- | TODO, when parsing and pretty-printing, it would be good to allow some
+-- minor syntactic sugar for things like multi-variable lambdas and foralls,
+-- and applications of more than two expressions.
+
+-- | Serialize an expression into a symbolic-expression; helpful for printing
+-- somewhat human readable representations of an expression.
+toSExpr :: (b -> String) -> Expr' b -> SExpr
+toSExpr showIdent = recurse
+  where
+    recurse = \case
+        Var x -> Atom (showIdent x)
+        Star -> Atom "*"
+        Forall x t s -> List [ Atom "forall", Atom (showIdent x)
+                             , recurse t, recurse s
+                             ]
+        Lambda x m -> List [Atom "lambda", Atom (showIdent x), recurse m]
+        Apply m n -> List [recurse m, recurse n]
+        AnnotType m t -> List [Atom ":", recurse m, recurse t]
+        AnnotSource m s -> At (recurse m) s
+
+-- | Unserialize an expression from a symbolic-expression; helpful for reading
+-- in expressions from text files.
+fromSExpr :: SExpr -> Either String (Expr' String)
+fromSExpr = convertError . recurse
+  where
+    recurse = \case
+        Atom "*" ->
+            return Star
+        Atom x ->
+            if x `elem` reservedWords
+                then newError $ "'" ++ x ++ "' is a reserved word."
+                else return (Var x)
+        List [Atom "forall", Atom x, t, s] ->
+            Forall x <$> recurse t <*> recurse s
+        List ((Atom "forall"):_) ->
+            newError $ "'forall' must be applied to three arguments, the "
+                      ++ "first of which must be an atom."
+        List [Atom "lambda", Atom x, m] ->
+            Lambda x <$> recurse m
+        List ((Atom "lambda"):_) ->
+            newError $ "'lambda' must be applied to two arguments, the "
+                      ++ "first of which must be an atom."
+        List [Atom ":", m, t] ->
+            AnnotType <$> recurse m <*> recurse t
+        List ((Atom ":"):_) ->
+            newError "':' must be applied to two arguments."
+        List [] ->
+            newError "'()' is not a valid expression."
+        List [_] ->
+            newError "Cannot apply zero arguments to an expression."
+        List xs ->
+            foldl1 Apply <$> mapM recurse xs
+        At expr loc ->
+            catchError
+                (AnnotSource <$> recurse expr <*> pure loc)
+                (throwError . augmentError loc)
+    reservedWords = ["forall", "lambda", ":"]
+    newError = throwError . (,) Nothing
+    augmentError loc = \case
+        -- | TODO, it would be good to print out the line(s) in which the
+        -- error occurs, along with a caret (^) and span (~) to make error
+        -- identification easier.
+        (Nothing, msg) -> (Just $ "At location [" ++ show (sourceStartLine loc)
+                               ++ ":" ++ show (sourceStartCol loc) ++ "]", msg)
+        err -> err
+    convertError = \case
+        Left (Nothing, msg) -> Left msg
+        Left (Just loc, msg) -> Left (msg ++ "\n\t" ++ loc)
+        Right result -> Right result
