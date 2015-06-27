@@ -1,5 +1,8 @@
 {-# LANGUAGE LambdaCase #-}
 
+-- TODO, perhaps an annotation marking an expression as side-effecting, and
+--       therefore as something which should not be optimized out.
+
 -- | Distill expressions.
 module Distill.Expr where
 
@@ -114,9 +117,7 @@ inferType expr = case expr of
         t <- inferType m
         assumeIn x t $ defineIn x m $ inferType n
     Letrec binds n -> do
-        let xs = map (\(x,_,_) -> x) binds
-        let ts = map (\(_,t,_) -> t) binds
-        let ms = map (\(_,_,m) -> m) binds
+        let (xs, ts, ms) = unzip3 binds
         assumesIn (zip xs ts) $ definesIn (zip xs ms) $ do
             mapM_ (uncurry checkType) (zip ms ts)
             inferType n
@@ -191,7 +192,7 @@ normalize = ignoringAnnotations $ \case
     Star -> return Star
     Let x m n -> normalize (subst x m n)
     -- May be able to do some normalizing here, but in general we can't.
-    Letrec binds m -> return (Letrec binds m)
+    Letrec binds m -> Letrec binds <$> normalize m
     Forall x t s -> Forall x <$> normalize t <*> normalize s
     Lambda x m -> Lambda x <$> normalize m
     Apply m n -> do
@@ -210,9 +211,7 @@ freeVars = recurse
         Star            -> []
         Let x m n       -> recurse m `union` (recurse n \\ [x])
         Letrec binds n  ->
-            let xs = map (\(x,_,_) -> x) binds
-                ts = map (\(_,t,_) -> t) binds
-                ms = map (\(_,_,m) -> m) binds in
+            let (xs, ts, ms) = unzip3 binds in
             union
                 (foldr union [] (map recurse (n:ms)) \\ xs)
                 (foldr union [] (map recurse ts))
@@ -242,9 +241,7 @@ renumber start rebound expr =
             x' <- gensym
             Let x' <$> recurse m <*> local ((x,x'):) (recurse n)
         Letrec binds n -> do
-            let xs = map (\(x,_,_) -> x) binds
-            let ts = map (\(_,t,_) -> t) binds
-            let ms = map (\(_,_,m) -> m) binds
+            let (xs, ts, ms) = unzip3 binds
             xs' <- replicateM (length xs) gensym
             ts' <- mapM recurse ts
             local (zip xs xs' ++) $ do
@@ -345,12 +342,12 @@ fromSExpr = convertError . recurse
             Forall x <$> recurse t <*> recurse s
         List ((Atom "forall"):_) ->
             newError $ "'forall' must be applied to three arguments, the "
-                      ++ "first of which must be an atom."
+                    ++ "first of which must be an atom."
         List [Atom "lambda", Atom x, m] ->
             Lambda x <$> recurse m
         List ((Atom "lambda"):_) ->
             newError $ "'lambda' must be applied to two arguments, the "
-                      ++ "first of which must be an atom."
+                    ++ "first of which must be an atom."
         List [Atom ":", m, t] ->
             AnnotType <$> recurse m <*> recurse t
         List ((Atom ":"):_) ->
