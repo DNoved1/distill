@@ -1,0 +1,3 @@
+(:
+  (lambda a (lambda x x))
+  (forall a * (forall x a a)))

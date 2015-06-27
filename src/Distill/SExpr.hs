@@ -5,6 +5,7 @@
 module Distill.SExpr
     ( SExpr(..)
     , SourceLoc(..)
+    , ignoringAt
     , parseSExpr
     , pprSExpr
     ) where
@@ -21,6 +22,7 @@ data SourceLoc = SourceLoc
     , sourceEndCol      :: Int
     , sourceEndLine     :: Int
     }
+  deriving (Show, Read)
 
 -- | A symbolic-expression, ala lisp.
 data SExpr
@@ -28,6 +30,12 @@ data SExpr
     | List [SExpr]
     -- | Source location information, for error messages.
     | At SExpr SourceLoc
+  deriving (Show, Read)
+
+-- | Ignore source location annotations; useful for pattern-matching.
+ignoringAt :: SExpr -> SExpr
+ignoringAt (At sexpr _) = ignoringAt sexpr
+ignoringAt sexpr = sexpr
 
 -- | Parse a symbolic-expression. The first argument determines what
 -- characters are allowed in atoms.

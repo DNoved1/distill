@@ -1,4 +1,5 @@
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE ViewPatterns #-}
 
 -- TODO, perhaps an annotation marking an expression as side-effecting, and
 --       therefore as something which should not be optimized out.
@@ -31,6 +32,7 @@ data Expr' b
     | AnnotType (Expr' b) (Type' b)
     -- | Source location annotation.
     | AnnotSource (Expr' b) SourceLoc
+  deriving (Show, Read)
 
 -- | A type is an ordinary expression, however a different name is typically
 -- used for clarity's sake.
@@ -44,6 +46,10 @@ type Type' = Expr'
 --     * Reader [(b, Expr' b)] - For definitions, introduced through let
 --           bindings or at global scope.
 type TCM b a = ReaderT ([(b, Type' b)], [(b, Expr' b)]) (Either String) a
+
+-- | Run the type checking monad.
+runTCM :: TCM b a -> [(b, Type' b)] -> [(b, Expr' b)] -> Either String a
+runTCM tcm assume defs = runReaderT tcm (assume, defs)
 
 -- | Assume a variable is a given type while type checking a certain piece of
 -- code. This is useful for introducing abstractions such as in lambdas and
@@ -93,11 +99,13 @@ stripAnnotation = \case
 checkType :: Eq b => Expr' b -> Type' b -> TCM b ()
 checkType expr type_ = case expr of
     Lambda x m -> do
-        Forall y t s <- case type_ of
+        Forall y t s <- case stripAnnotation type_ of
                 correct@(Forall _ _ _) -> return correct
                 _ -> throwError "Lambda cannot have non-function type."
         checkType t Star
         assumeIn x t $ checkType m s
+    AnnotSource m s ->
+        checkType m type_
     _ -> do
         type_' <- inferType expr
         checkEqual type_ type_'
@@ -329,43 +337,44 @@ fromSExpr = convertError . recurse
             if x `elem` reservedWords
                 then newError $ "'" ++ x ++ "' is a reserved word."
                 else return (Var x)
-        List [Atom "let", Atom x, m, n] ->
-            Let x <$> recurse m <*> recurse n
-        List ((Atom "let"):_) ->
-            newError $ "'let' must be applied to three arguments, the "
-                    ++ "first of which must be an atom."
-        List [Atom "letrec", List binds, n] ->
-            Letrec <$> mapM recBindFromSExpr binds <*> recurse n
-        List ((Atom "letrec"):_) ->
-            newError "'letrec' must be applied to two arguments."
-        List [Atom "forall", Atom x, t, s] ->
-            Forall x <$> recurse t <*> recurse s
-        List ((Atom "forall"):_) ->
-            newError $ "'forall' must be applied to three arguments, the "
-                    ++ "first of which must be an atom."
-        List [Atom "lambda", Atom x, m] ->
-            Lambda x <$> recurse m
-        List ((Atom "lambda"):_) ->
-            newError $ "'lambda' must be applied to two arguments, the "
-                    ++ "first of which must be an atom."
-        List [Atom ":", m, t] ->
-            AnnotType <$> recurse m <*> recurse t
-        List ((Atom ":"):_) ->
-            newError "':' must be applied to two arguments."
         List [] ->
             newError "'()' is not a valid expression."
-        List [_] ->
-            newError "Cannot apply zero arguments to an expression."
-        List xs ->
-            foldl1 Apply <$> mapM recurse xs
+        List (f:args) -> case f of
+            (ignoringAt -> Atom "let") -> case args of
+                [ignoringAt -> Atom x, m, n] ->
+                    Let x <$> recurse m <*> recurse n
+                _ -> newError $ "'let' must be applied to three arguments, "
+                             ++ "the first of which must be an atom."
+            (ignoringAt -> Atom "letrec") -> case args of
+                [ignoringAt -> List binds, n] ->
+                    Letrec <$> mapM recBindFromSExpr binds <*> recurse n
+                _ -> newError "'letrec' must be applied to two arguments."
+            (ignoringAt -> Atom "forall") -> case args of
+                [ignoringAt -> Atom x, t, s] ->
+                    Forall x <$> recurse t <*> recurse s
+                _ -> newError $ "'forall' must be applied to three arguments, "
+                             ++ "the first of which must be an atom."
+            (ignoringAt -> Atom "lambda") -> case args of
+                [ignoringAt -> Atom x, m] ->
+                    Lambda x <$> recurse m
+                _ -> newError $ "'lambda' must be applied to two arguments, "
+                             ++ "the first of which must be an atom."
+            (ignoringAt -> Atom ":") -> case args of
+                [m, t] ->
+                    AnnotType <$> recurse m <*> recurse t
+                _ -> newError "':' must be applied to two arguments."
+            _ -> case args of
+                [] -> newError "Cannot apply zero arguments to an expression."
+                _ -> foldl1 Apply <$> mapM recurse (f:args)
         At expr loc ->
             catchError
                 (AnnotSource <$> recurse expr <*> pure loc)
                 (throwError . augmentError loc)
-    recBindFromSExpr (List [Atom x, t, m]) = (,,) x <$> recurse t <*> recurse m
-    recBindFromSExpr _ = newError $ "Bindings in a 'letrec' must be lists of "
-                                 ++ "three elements, the first of which must "
-                                 ++ "be an atom."
+    recBindFromSExpr = \case
+        List [ignoringAt -> Atom x, t, m] ->
+            (,,) x <$> recurse t <*> recurse m
+        _ -> newError $ "Bindings in a 'letrec' must be lists of three "
+                     ++ "elements, the first of which must be an atom."
     reservedWords = ["let", "letrec", "forall", "lambda", ":"]
     newError = throwError . (,) Nothing
     augmentError loc = \case

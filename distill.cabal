@@ -24,3 +24,15 @@ library
   default-language:    Haskell2010
   ghc-options:
     -fwarn-unused-imports
+
+Test-Suite test-distill
+  type:                exitcode-stdio-1.0
+  main-is:             Main.hs
+  build-depends:
+    base >=4.8 && <4.9
+   ,HUnit
+   ,mtl
+   ,parsec
+   ,pretty
+  hs-source-dirs:      src, test
+  default-language:    Haskell2010
