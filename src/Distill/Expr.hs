@@ -38,6 +38,28 @@ data Expr' b
 -- used for clarity's sake.
 type Type' = Expr'
 
+-- | Utility to split a lambda into a list of its arguments and its body.
+splitLambda :: Expr' b -> ([b], Expr' b)
+splitLambda = \case
+    Lambda x m -> let (args, body) = splitLambda m in (x:args, body)
+    m          -> ([], m)
+
+-- | Utility to create a lambda from a list of its arguments and its body.
+unsplitLambda :: ([b], Expr' b) -> Expr' b
+unsplitLambda = \case
+    (x:xs, m) -> Lambda x (unsplitLambda (xs, m))
+    ([], m)   -> m
+
+-- | Utility to split an application into a list of expressions.
+splitApply :: Expr' b -> [Expr' b]
+splitApply = \case
+    Apply m n -> splitApply m ++ [n]
+    m         -> [m]
+
+-- | Utility to convert a list of expressions into an application/
+unsplitApply :: [Expr' b] -> Expr' b
+unsplitApply = foldl1 Apply
+
 -- | The monad used for type checking. Includes:
 --
 --     * Either String - For error messages.
@@ -319,8 +341,10 @@ toSExpr showIdent = recurse
         Forall x t s -> List [ Atom "forall", Atom (showIdent x)
                              , recurse t, recurse s
                              ]
-        Lambda x m -> List [Atom "lambda", Atom (showIdent x), recurse m]
-        Apply m n -> List [recurse m, recurse n]
+        Lambda x m ->
+            let (args, body) = splitLambda (Lambda x m) in
+            List [Atom "lambda", List (map (Atom . showIdent) args), recurse m]
+        Apply m n -> List (map recurse (splitApply (Apply m n)))
         AnnotType m t -> List [Atom ":", recurse m, recurse t]
         AnnotSource m s -> At (recurse m) s
     recBindToSExpr (x, t, m) = List [Atom (showIdent x), recurse t, recurse m]
@@ -355,8 +379,10 @@ fromSExpr = convertError . recurse
                 _ -> newError $ "'forall' must be applied to three arguments, "
                              ++ "the first of which must be an atom."
             (ignoringAt -> Atom "lambda") -> case args of
-                [ignoringAt -> Atom x, m] ->
-                    Lambda x <$> recurse m
+                [ignoringAt -> List binds, m] -> if not (null binds)
+                    then curry unsplitLambda <$> mapM lambdaArgsFromSExpr binds
+                                             <*> recurse m
+                    else newError "'lambda' must have at least one binder."
                 _ -> newError $ "'lambda' must be applied to two arguments, "
                              ++ "the first of which must be an atom."
             (ignoringAt -> Atom ":") -> case args of
@@ -365,7 +391,7 @@ fromSExpr = convertError . recurse
                 _ -> newError "':' must be applied to two arguments."
             _ -> case args of
                 [] -> newError "Cannot apply zero arguments to an expression."
-                _ -> foldl1 Apply <$> mapM recurse (f:args)
+                _ -> unsplitApply <$> mapM recurse (f:args)
         At expr loc ->
             catchError
                 (AnnotSource <$> recurse expr <*> pure loc)
@@ -375,6 +401,9 @@ fromSExpr = convertError . recurse
             (,,) x <$> recurse t <*> recurse m
         _ -> newError $ "Bindings in a 'letrec' must be lists of three "
                      ++ "elements, the first of which must be an atom."
+    lambdaArgsFromSExpr = \case
+        (ignoringAt -> Atom x) -> return x
+        _ -> newError $ "Bindings  in a 'lambda' must be atoms."
     reservedWords = ["let", "letrec", "forall", "lambda", ":"]
     newError = throwError . (,) Nothing
     augmentError loc = \case
