@@ -1,8 +1,6 @@
+{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE ViewPatterns #-}
-
--- TODO, perhaps an annotation marking an expression as side-effecting, and
---       therefore as something which should not be optimized out.
 
 -- | Distill expressions.
 module Distill.Expr where
@@ -254,8 +252,8 @@ freeVars = recurse
 -- | Renumber the identifiers in an expression such that they are unique. No
 -- free variables should exist in the expression - if they do an exception may
 -- be thrown.
-renumber :: (Enum b, Eq b) => b -> [(b, b)] -> Expr' b -> Expr' b
-renumber start rebound expr =
+renumber :: Eq b => (b -> Int -> b') -> Int -> [(b, b')] -> Expr' b -> Expr' b'
+renumber ctor start rebound expr =
     flip evalState start $ flip runReaderT rebound $ recurse expr
   where
     recurse = \case
@@ -268,30 +266,30 @@ renumber start rebound expr =
         Star ->
             return Star
         Let x m n -> do
-            x' <- gensym
+            x' <- gensym x
             Let x' <$> recurse m <*> local ((x,x'):) (recurse n)
         Letrec binds n -> do
             let (xs, ts, ms) = unzip3 binds
-            xs' <- replicateM (length xs) gensym
+            xs' <- mapM gensym xs
             ts' <- mapM recurse ts
             local (zip xs xs' ++) $ do
                 ms' <- mapM recurse ms
                 n' <- recurse n
                 return (Letrec (zip3 xs' ts' ms') n')
         Forall x t s -> do
-            x' <- gensym
+            x' <- gensym x
             Forall x' <$> recurse t <*> local ((x,x'):) (recurse s)
         Lambda x m -> do
-            x' <- gensym
+            x' <- gensym x
             Lambda x' <$> local ((x,x'):) (recurse m)
         Apply m n ->
             Apply <$> recurse m <*> recurse n
         AnnotType m t -> AnnotType <$> recurse m <*> recurse t
         AnnotSource m s -> AnnotSource <$> recurse m <*> pure s
-    gensym = do
-        newsym <- get
+    gensym old = do
+        num <- get
         modify succ
-        return newsym
+        return (ctor old num)
 
 -- | Substitute an identifier for an expression in another expression. In other
 -- words,
