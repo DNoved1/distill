@@ -10,5 +10,4 @@ Refactoring
   fails to compile on my machine.
 * Maybe make a ExprF type for simplifying some recursion through catamorphisms
   and traversals.
-* Add type annotations to lambda parameters, so type inference is never
-  needed, and so AnnotType can be removed, simplifying some aspects.
+* Remove all todos from source code and put them here.

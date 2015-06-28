@@ -79,13 +79,12 @@ arbitraryExpr bound s = sized $ \size -> do
         (s, x) <- arbitraryUniqueVar s
         (s, t) <- smaller $ arbitraryType bound s
         (s, m, t') <- smaller $ arbitraryExpr ((x, t):bound) s
-        let type_ = Forall x t t'
-        return (s, AnnotType (Lambda x m) type_, type_)
+        return (s, Lambda x t m, Forall x t t')
     arbitraryApply bound s = do
         (s, x) <- arbitraryUniqueVar s
         (s, n, t) <- smaller $ arbitraryExpr bound s
         (s, body, t') <- smaller $ arbitraryExpr ((x, t):bound) s
-        let m = AnnotType (Lambda x body) (Forall x t t')
+        let m = Lambda x t body
         return (s, Apply m n, subst x n t')
 
 -- | Generate an arbitrary well-formed type.

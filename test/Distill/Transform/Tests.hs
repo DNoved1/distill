@@ -27,8 +27,10 @@ tests = TestLabel "Distill.Transform.Tests" $ TestList
 isSuperCombinator :: Eq b => [b] -> Expr' b -> Bool
 isSuperCombinator bound expr =
     null (freeVars expr \\ bound) && case expr of
-        Lambda _ _ -> noLambdaIn (snd (splitLambda expr))
-        _          -> noLambdaIn expr
+        Lambda{} ->
+            let (args, body) = splitLambda expr in
+            and (noLambdaIn body : map (noLambdaIn . snd) args)
+        _ -> noLambdaIn expr
   where
     noLambdaIn = \case
         Var x -> True
@@ -38,9 +40,8 @@ isSuperCombinator bound expr =
             let (xs, ts, ms) = unzip3 binds in
             and (noLambdaIn n : map noLambdaIn ts ++ map noLambdaIn ms)
         Forall x t s -> noLambdaIn t && noLambdaIn s
-        Lambda x m -> noLambdaIn m
+        Lambda{} -> False
         Apply m n -> noLambdaIn m && noLambdaIn n
-        AnnotType m t -> noLambdaIn m && noLambdaIn t
         AnnotSource m s -> noLambdaIn m
 
 -- | The property that lamdba lifting a set of declarations should result

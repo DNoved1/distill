@@ -24,10 +24,8 @@ data Expr' b
     -- so that constraint satisfaction is not necessary when type-checking.
     | Letrec [(b, Expr' b, Expr' b)] (Expr' b)
     | Forall b (Type' b) (Type' b)
-    | Lambda b (Expr' b)
+    | Lambda b (Type' b) (Expr' b)
     | Apply (Expr' b) (Expr' b)
-    -- | Type annotation.
-    | AnnotType (Expr' b) (Type' b)
     -- | Source location annotation.
     | AnnotSource (Expr' b) SourceLoc
   deriving (Show, Read)
@@ -40,16 +38,16 @@ type Type' = Expr'
 type Decl' b = (b, Expr' b)
 
 -- | Utility to split a lambda into a list of its arguments and its body.
-splitLambda :: Expr' b -> ([b], Expr' b)
+splitLambda :: Expr' b -> ([(b, Type' b)], Expr' b)
 splitLambda = \case
-    Lambda x m -> let (args, body) = splitLambda m in (x:args, body)
-    m          -> ([], m)
+    Lambda x t m -> let (args, body) = splitLambda m in ((x, t):args, body)
+    m            -> ([], m)
 
 -- | Utility to create a lambda from a list of its arguments and its body.
-unsplitLambda :: ([b], Expr' b) -> Expr' b
+unsplitLambda :: ([(b, Type' b)], Expr' b) -> Expr' b
 unsplitLambda = \case
-    (x:xs, m) -> Lambda x (unsplitLambda (xs, m))
-    ([], m)   -> m
+    ((x, t):xs, m) -> Lambda x t (unsplitLambda (xs, m))
+    ([], m)        -> m
 
 -- | Utility to split an application into a list of expressions.
 splitApply :: Expr' b -> [Expr' b]
@@ -74,9 +72,8 @@ foldVars f start expr = recurse start expr
             let (xs, ts, ms) = unzip3 binds in
             recurse (foldl recurse (foldl recurse (foldl f acc xs) ts) ms) n
         Forall x t s -> recurse (recurse (f acc x) t) s
-        Lambda x m -> recurse (f acc x) m
+        Lambda x t m -> recurse (recurse (f acc x) t) m
         Apply m n -> recurse (recurse acc m) n
-        AnnotType m t -> recurse (recurse acc m) t
         AnnotSource m s -> recurse acc m
 
 -- | The monad used for type checking. Includes:
@@ -124,14 +121,12 @@ getDefinitions = snd <$> ask
 ignoringAnnotations :: Monad m => (Expr' b -> m (Expr' b))
                                -> (Expr' b -> m (Expr' b))
 ignoringAnnotations f = \case
-    AnnotType m t   -> AnnotType <$> f m <*> pure t
     AnnotSource m s -> AnnotSource <$> f m <*> pure s
     m               -> f m
 
 -- | Strip a top-level annotation; useful for pattern matching.
 stripAnnotation :: Expr' b -> Expr' b
 stripAnnotation = \case
-    AnnotType m _   -> stripAnnotation m
     AnnotSource m _ -> stripAnnotation m
     m               -> m
 
@@ -139,12 +134,6 @@ stripAnnotation = \case
 -- given type an error will be generated
 checkType :: Eq b => Expr' b -> Type' b -> TCM b ()
 checkType expr type_ = case expr of
-    Lambda x m -> do
-        Forall y t s <- case stripAnnotation type_ of
-                correct@(Forall _ _ _) -> return correct
-                _ -> throwError "Lambda cannot have non-function type."
-        checkType t Star
-        assumeIn x t $ checkType m s
     AnnotSource m s ->
         checkType m type_
     _ -> do
@@ -177,17 +166,16 @@ inferType expr = case expr of
         checkType t Star
         assumeIn x t $ checkType s Star
         return Star
-    Lambda _ _ ->
-        throwError "Cannot infer the type of an unannotated lambda."
+    Lambda x t m -> do
+        checkType t Star
+        s <- assumeIn x t $ inferType m
+        return (Forall x t s)
     Apply m n -> do
         Forall x t s <- inferType m >>= \case
             correct@(Forall _ _ _) -> return correct
             _ -> throwError "Cannot apply to non-function type."
         checkType n t
         return (subst x t s)
-    AnnotType m t -> do
-        checkType m t
-        return t
     AnnotSource m _ ->
         inferType m
 
@@ -217,7 +205,8 @@ checkEqual expr1 expr2 = do
             (Forall x t s, Forall y r q) -> do
                 checkEqual' t (renameVar y x r)
                 checkEqual' s (renameVar y x q)
-            (Lambda x m, Lambda y n) ->
+            (Lambda x t m, Lambda y s n) -> do
+                checkEqual' t s
                 checkEqual' m (renameVar y x n)
             (Apply m n, Apply o p) -> do
                 checkEqual' m o
@@ -243,12 +232,12 @@ normalize = ignoringAnnotations $ \case
     -- May be able to do some normalizing here, but in general we can't.
     Letrec binds m -> Letrec binds <$> normalize m
     Forall x t s -> Forall x <$> normalize t <*> normalize s
-    Lambda x m -> Lambda x <$> normalize m
+    Lambda x t m -> Lambda x <$> normalize t <*> normalize m
     Apply m n -> do
         (normalize m >>=) $ ignoringAnnotations $ \case
             -- TODO, we need to check that the type of n matches the expected
             --       argument type.
-            Lambda x p -> normalize (subst x n p)
+            Lambda x t p -> normalize (subst x n p)
             m' -> Apply m' <$> normalize n
 
 -- | Determine the set of unbound variables in an expression.
@@ -265,9 +254,8 @@ freeVars = recurse
                 (foldr union [] (map recurse (n:ms)) \\ xs)
                 (foldr union [] (map recurse ts))
         Forall x t s    -> recurse t `union` (recurse s \\ [x])
-        Lambda x m      -> recurse m \\ [x]
+        Lambda x t m    -> recurse t `union` (recurse m \\ [x])
         Apply m n       -> recurse m `union` recurse n
-        AnnotType m t   -> recurse m `union` recurse t
         AnnotSource m t -> recurse m
 
 -- | Renumber the identifiers in an expression such that they are unique. No
@@ -300,12 +288,11 @@ renumber ctor start rebound expr =
         Forall x t s -> do
             x' <- gensym x
             Forall x' <$> recurse t <*> local ((x,x'):) (recurse s)
-        Lambda x m -> do
+        Lambda x t m -> do
             x' <- gensym x
-            Lambda x' <$> local ((x,x'):) (recurse m)
+            Lambda x' <$> recurse t <*> local ((x,x'):) (recurse m)
         Apply m n ->
             Apply <$> recurse m <*> recurse n
-        AnnotType m t -> AnnotType <$> recurse m <*> recurse t
         AnnotSource m s -> AnnotSource <$> recurse m <*> pure s
     gensym old = do
         num <- get
@@ -331,10 +318,9 @@ subst z p = \case
     Letrec binds n           -> Letrec (map substRecBind binds) (subst z p n)
     Forall x t s | x == z    -> bomb
                  | otherwise -> Forall x (subst z p t) (subst z p s)
-    Lambda x m   | x == z    -> bomb
-                 | otherwise -> Lambda x (subst z p m)
+    Lambda x t m | x == z    -> bomb
+                 | otherwise -> Lambda x (subst z p t) (subst z p m)
     Apply m n                -> Apply (subst z p m) (subst z p n)
-    AnnotType m t            -> AnnotType (subst z p m) (subst z p t)
     AnnotSource m source     -> AnnotSource (subst z p m) source
   where
     bomb = error "Substituting through non-unique identifiers."
@@ -360,13 +346,13 @@ toSExpr showIdent = recurse
         Forall x t s -> List [ Atom "forall", Atom (showIdent x)
                              , recurse t, recurse s
                              ]
-        Lambda x m ->
-            let (args, body) = splitLambda (Lambda x m) in
-            List [Atom "lambda", List (map (Atom . showIdent) args), recurse m]
+        Lambda x t m ->
+            let (args, body) = splitLambda (Lambda x t m) in
+            List [Atom "lambda", List (map lambdaArgToSExpr args), recurse m]
         Apply m n -> List (map recurse (splitApply (Apply m n)))
-        AnnotType m t -> List [Atom ":", recurse m, recurse t]
         AnnotSource m s -> At (recurse m) s
     recBindToSExpr (x, t, m) = List [Atom (showIdent x), recurse t, recurse m]
+    lambdaArgToSExpr (x, t) = List [Atom (showIdent x), recurse t]
 
 -- | Unserialize an expression from a symbolic-expression; helpful for reading
 -- in expressions from text files.
@@ -404,10 +390,6 @@ fromSExpr = convertError . recurse
                     else newError "'lambda' must have at least one binder."
                 _ -> newError $ "'lambda' must be applied to two arguments, "
                              ++ "the first of which must be an atom."
-            (ignoringAt -> Atom ":") -> case args of
-                [m, t] ->
-                    AnnotType <$> recurse m <*> recurse t
-                _ -> newError "':' must be applied to two arguments."
             _ -> case args of
                 [] -> newError "Cannot apply zero arguments to an expression."
                 _ -> unsplitApply <$> mapM recurse (f:args)
@@ -421,9 +403,10 @@ fromSExpr = convertError . recurse
         _ -> newError $ "Bindings in a 'letrec' must be lists of three "
                      ++ "elements, the first of which must be an atom."
     lambdaArgsFromSExpr = \case
-        (ignoringAt -> Atom x) -> return x
-        _ -> newError $ "Bindings  in a 'lambda' must be atoms."
-    reservedWords = ["let", "letrec", "forall", "lambda", ":"]
+        (ignoringAt -> List [ignoringAt -> Atom x, t]) -> (,) x <$> recurse t
+        _ -> newError $ "Arguments in a 'lambda' must be a two element list, "
+                     ++ "the first of which must be an atom."
+    reservedWords = ["let", "letrec", "forall", "lambda"]
     newError = throwError . (,) Nothing
     augmentError loc = \case
         -- TODO, it would be good to print out the line(s) in which the

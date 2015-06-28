@@ -1,3 +1,1 @@
-(:
-  (lambda (a x) x)
-  (forall a * (forall x a a)))
+(lambda ((a *) (x a)) x)
