@@ -36,24 +36,29 @@ isSuperCombinator bound expr =
         Var x -> True
         Star -> True
         Let x m n -> noLambdaIn m && noLambdaIn n
-        Letrec binds n ->
-            let (xs, ts, ms) = unzip3 binds in
-            and (noLambdaIn n : map noLambdaIn ts ++ map noLambdaIn ms)
         Forall x t s -> noLambdaIn t && noLambdaIn s
         Lambda{} -> False
         Apply m n -> noLambdaIn m && noLambdaIn n
         AnnotSource m s -> noLambdaIn m
 
+newtype ExprAndType = ExprAndType (Expr, Type)
+  deriving (Show, Read)
+
+instance Arbitrary ExprAndType where
+    arbitrary = do
+        (_, m, t) <- arbitraryExpr [] 0
+        return (ExprAndType (m, t))
+
 -- | The property that lamdba lifting a set of declarations should result
 -- in a set of declarations, all of which are supercombinators.
-prop_lambdaLiftingCreatesSuperCombinators :: WellTypedExpr -> Result
-prop_lambdaLiftingCreatesSuperCombinators (WellTypedExpr expr) =
+prop_lambdaLiftingCreatesSuperCombinators :: ExprAndType -> Result
+prop_lambdaLiftingCreatesSuperCombinators (ExprAndType (expr, type_)) =
     let uniqueStart = nextAvailableUnique expr
         decls = lambdaLift
             renumberUnique
             (succ uniqueStart)
-            [(UniqueVar "main" uniqueStart, expr)]
-        (names, exprs) = unzip decls
+            [Decl' (UniqueVar "main" uniqueStart) type_ expr]
+        (names, exprs) = unzip (map (\(Decl' x t m) -> (x, m)) decls)
         namesToIsSuper = zip names (map (isSuperCombinator names) exprs)
         combine acc (name, isSuper) = if isSuper then acc else name:acc
     in
@@ -70,7 +75,7 @@ prop_lambdaLiftingCreatesSuperCombinators (WellTypedExpr expr) =
             }
   where
     showExpr expr = render $ pprSExpr $ toSExpr showUniqueVar expr
-    showDecl (name, expr) = render $ pprSExpr $ List
-        [Atom "define", Atom (showUniqueVar name), toSExpr showUniqueVar expr]
+    showDecl (Decl' x t m) = render $ pprSExpr $ List
+        [Atom "define", Atom (showUniqueVar x), toSExpr showUniqueVar m]
     showUniqueVar (UniqueVar name num) = name ++ "$" ++ show num
     renumberUnique (UniqueVar name _) num = UniqueVar name num

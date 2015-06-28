@@ -20,9 +20,6 @@ data Expr' b
     | Star
     -- | Non-recursive let binding
     | Let b (Expr' b) (Expr' b)
-    -- | Recursive let binding. Recursive bindings require type annotations
-    -- so that constraint satisfaction is not necessary when type-checking.
-    | Letrec [(b, Expr' b, Expr' b)] (Expr' b)
     | Forall b (Type' b) (Type' b)
     | Lambda b (Type' b) (Expr' b)
     | Apply (Expr' b) (Expr' b)
@@ -35,7 +32,7 @@ data Expr' b
 type Type' = Expr'
 
 -- | A top-level declaration in a file.
-type Decl' b = (b, Expr' b)
+data Decl' b = Decl' b (Type' b) (Expr' b)
 
 -- | Utility to split a lambda into a list of its arguments and its body.
 splitLambda :: Expr' b -> ([(b, Type' b)], Expr' b)
@@ -68,9 +65,6 @@ foldVars f start expr = recurse start expr
         Var x -> f acc x
         Star -> acc
         Let x m n -> recurse (recurse (f acc x) m) n
-        Letrec binds n ->
-            let (xs, ts, ms) = unzip3 binds in
-            recurse (foldl recurse (foldl recurse (foldl f acc xs) ts) ms) n
         Forall x t s -> recurse (recurse (f acc x) t) s
         Lambda x t m -> recurse (recurse (f acc x) t) m
         Apply m n -> recurse (recurse acc m) n
@@ -154,11 +148,6 @@ inferType expr = case expr of
     Let x m n -> do
         t <- inferType m
         assumeIn x t $ defineIn x m $ inferType n
-    Letrec binds n -> do
-        let (xs, ts, ms) = unzip3 binds
-        assumesIn (zip xs ts) $ definesIn (zip xs ms) $ do
-            mapM_ (uncurry checkType) (zip ms ts)
-            inferType n
     Forall x t s -> do
         checkType t Star
         assumeIn x t $ checkType s Star
@@ -194,11 +183,6 @@ checkEqual expr1 expr2 = do
             (Let x m n, Let y o p) -> do
                 checkEqual' m o
                 checkEqual' n (renameVar y x p)
-            (Letrec binds1 m, Letrec binds2 n) ->
-                -- They could theoretically, but with terrible performance -
-                -- it would require checking the permutations for equality.
-                throwError $ "Recursive let binds cannot be compared for "
-                          ++ "equality."
             (Forall x t s, Forall y r q) -> do
                 checkEqual' t (renameVar y x r)
                 checkEqual' s (renameVar y x q)
@@ -226,8 +210,6 @@ normalize = ignoringAnnotations $ \case
             Nothing -> return (Var x)
     Star -> return Star
     Let x m n -> normalize (subst x m n)
-    -- May be able to do some normalizing here, but in general we can't.
-    Letrec binds m -> Letrec binds <$> normalize m
     Forall x t s -> Forall x <$> normalize t <*> normalize s
     Lambda x t m -> Lambda x <$> normalize t <*> normalize m
     Apply m n -> do
@@ -243,11 +225,6 @@ freeVars = recurse
         Var x           -> [x]
         Star            -> []
         Let x m n       -> recurse m `union` (recurse n \\ [x])
-        Letrec binds n  ->
-            let (xs, ts, ms) = unzip3 binds in
-            union
-                (foldr union [] (map recurse (n:ms)) \\ xs)
-                (foldr union [] (map recurse ts))
         Forall x t s    -> recurse t `union` (recurse s \\ [x])
         Lambda x t m    -> recurse t `union` (recurse m \\ [x])
         Apply m n       -> recurse m `union` recurse n
@@ -272,14 +249,6 @@ renumber ctor start rebound expr =
         Let x m n -> do
             x' <- gensym x
             Let x' <$> recurse m <*> local ((x,x'):) (recurse n)
-        Letrec binds n -> do
-            let (xs, ts, ms) = unzip3 binds
-            xs' <- mapM gensym xs
-            ts' <- mapM recurse ts
-            local (zip xs xs' ++) $ do
-                ms' <- mapM recurse ms
-                n' <- recurse n
-                return (Letrec (zip3 xs' ts' ms') n')
         Forall x t s -> do
             x' <- gensym x
             Forall x' <$> recurse t <*> local ((x,x'):) (recurse s)
@@ -310,7 +279,6 @@ subst z p = \case
     Star                     -> Star
     Let x m n    | x == z    -> bomb
                  | otherwise -> Let x (subst z p m) (subst z p n)
-    Letrec binds n           -> Letrec (map substRecBind binds) (subst z p n)
     Forall x t s | x == z    -> bomb
                  | otherwise -> Forall x (subst z p t) (subst z p s)
     Lambda x t m | x == z    -> bomb
@@ -319,8 +287,6 @@ subst z p = \case
     AnnotSource m source     -> AnnotSource (subst z p m) source
   where
     bomb = error "Substituting through non-unique identifiers."
-    substRecBind (x, t, m) | x == z    = bomb
-                           | otherwise = (x, subst z p t, subst z p m)
 
 -- | Serialize an expression into a symbolic-expression; helpful for printing
 -- somewhat human readable representations of an expression.
@@ -331,9 +297,6 @@ toSExpr showIdent = recurse
         Var x -> Atom (showIdent x)
         Star -> Atom "*"
         Let x m n -> List [Atom "let", Atom (showIdent x), recurse m, recurse n]
-        Letrec binds n -> List [ Atom "letrec", List (map recBindToSExpr binds)
-                               , recurse n
-                               ]
         Forall x t s -> List [ Atom "forall", Atom (showIdent x)
                              , recurse t, recurse s
                              ]
@@ -342,7 +305,6 @@ toSExpr showIdent = recurse
             List [Atom "lambda", List (map lambdaArgToSExpr args), recurse m]
         Apply m n -> List (map recurse (splitApply (Apply m n)))
         AnnotSource m s -> At (recurse m) s
-    recBindToSExpr (x, t, m) = List [Atom (showIdent x), recurse t, recurse m]
     lambdaArgToSExpr (x, t) = List [Atom (showIdent x), recurse t]
 
 -- | Unserialize an expression from a symbolic-expression; helpful for reading
@@ -365,10 +327,6 @@ fromSExpr = convertError . recurse
                     Let x <$> recurse m <*> recurse n
                 _ -> newError $ "'let' must be applied to three arguments, "
                              ++ "the first of which must be an atom."
-            (ignoringAt -> Atom "letrec") -> case args of
-                [ignoringAt -> List binds, n] ->
-                    Letrec <$> mapM recBindFromSExpr binds <*> recurse n
-                _ -> newError "'letrec' must be applied to two arguments."
             (ignoringAt -> Atom "forall") -> case args of
                 [ignoringAt -> Atom x, t, s] ->
                     Forall x <$> recurse t <*> recurse s
@@ -388,16 +346,11 @@ fromSExpr = convertError . recurse
             catchError
                 (AnnotSource <$> recurse expr <*> pure loc)
                 (throwError . augmentError loc)
-    recBindFromSExpr = \case
-        List [ignoringAt -> Atom x, t, m] ->
-            (,,) x <$> recurse t <*> recurse m
-        _ -> newError $ "Bindings in a 'letrec' must be lists of three "
-                     ++ "elements, the first of which must be an atom."
     lambdaArgsFromSExpr = \case
         (ignoringAt -> List [ignoringAt -> Atom x, t]) -> (,) x <$> recurse t
         _ -> newError $ "Arguments in a 'lambda' must be a two element list, "
                      ++ "the first of which must be an atom."
-    reservedWords = ["let", "letrec", "forall", "lambda"]
+    reservedWords = ["let", "forall", "lambda"]
     newError = throwError . (,) Nothing
     augmentError loc = \case
         (Nothing, msg) -> (Just $ "At location [" ++ show (sourceStartLine loc)

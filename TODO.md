@@ -18,3 +18,5 @@ Refactoring
   when parsing and pretty-printing; create a similar style for lets/letrecs.
 * It would be good to print out the line(s) in which the error occurs, along
   with a caret (^) and span (~) to make error identification easier.
+* When lambda-lifting, we can't do one declaration at a time, because the
+  decl may depend on the others.

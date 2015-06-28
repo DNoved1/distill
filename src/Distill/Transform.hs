@@ -22,9 +22,9 @@ lambdaLift ctor start decls =
     snd $ snd $ runState state (start, [])
 
 lambdaLift' :: Eq b => (b -> Int -> b) -> Decl' b -> State (Int, [Decl' b]) ()
-lambdaLift' ctor (name, expr) = do
-    expr' <- runReaderT (lambdaLiftTop expr) (name, [])
-    modify (\(num, decls) -> (num, (name, expr'):decls))
+lambdaLift' ctor (Decl' x t m) = do
+    m' <- runReaderT (lambdaLiftTop m) (x, [])
+    modify (\(num, decls) -> (num, (Decl' x t m'):decls))
     return ()
   where
     lambdaLiftTop = \case
@@ -38,12 +38,6 @@ lambdaLift' ctor (name, expr) = do
         Var x -> return (Var x)
         Star -> return Star
         Let x m n -> Let x <$> lambdaLiftInner m <*> lambdaLiftInner n
-        Letrec binds n -> do
-            let (xs, ts, ms) = unzip3 binds
-            ts' <- mapM lambdaLiftInner ts
-            ms' <- mapM lambdaLiftInner ms
-            n'  <- lambdaLiftInner n
-            return (Letrec (zip3 xs ts' ms') n')
         Forall x t s -> Forall x <$> lambdaLiftInner t <*> lambdaLiftInner s
         Lambda x t m -> do
             newExpr <- lambdaLiftTop (Lambda x t m)
@@ -51,17 +45,18 @@ lambdaLift' ctor (name, expr) = do
             let freeIn = freeVars newExpr \\ boundIn
             args <- createArgs freeIn
             let newExpr' = unsplitLambda (args, newExpr)
+            newType <- typeof newExpr'
             name <- getName
             (num, decls) <- get
             let newName = ctor name num
-            let newDecl = (newName, newExpr')
+            let newDecl = Decl' newName newType newExpr'
             put (succ num, newDecl:decls)
             return (unsplitApply (Var newName : map Var freeIn))
         Apply m n -> Apply <$> lambdaLiftInner m <*> lambdaLiftInner n
         AnnotSource m s -> AnnotSource <$> lambdaLiftInner m <*> pure s
     boundVars = do
         (num, decls) <- get
-        return (map fst decls)
+        return (map (\(Decl' name _ _) -> name) decls)
     assumeArgs args = local (second (args ++))
     createArgs names = do
         (_, boundArgs) <- ask
@@ -70,3 +65,15 @@ lambdaLift' ctor (name, expr) = do
         -- is a precondition to calling 'lambdaLift'
         return (map (id &&& fromJust . flip lookup boundArgs) names)
     getName = fst <$> ask
+    typeof expr = do
+        (_, boundArgs) <- ask
+        (_, decls) <- get
+        let assumed = boundArgs ++ map (\(Decl' x t _) -> (x, t)) decls
+        let defined = map (\(Decl' x _ m) -> (x, m)) decls
+        -- Again, error in the case that the expression is not type-correct.
+        return (fromRight (runTCM (inferType expr) assumed defined))
+
+fromRight :: Either a b -> b
+fromRight = \case
+    Right b -> b
+    Left  _ -> error "Unwrapping right failed in 'fromRight'."
