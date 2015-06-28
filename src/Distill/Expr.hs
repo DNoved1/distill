@@ -159,9 +159,6 @@ inferType expr = case expr of
         assumesIn (zip xs ts) $ definesIn (zip xs ms) $ do
             mapM_ (uncurry checkType) (zip ms ts)
             inferType n
-        -- TODO, since the distill intermediate language is strict we need to
-        -- also check for dependencies on non-lazy, non-function expressions.
-        -- Eq, 'letrec x = 1:x in x' is not allowed, unless x is lazy.
     Forall x t s -> do
         checkType t Star
         assumeIn x t $ checkType s Star
@@ -235,8 +232,6 @@ normalize = ignoringAnnotations $ \case
     Lambda x t m -> Lambda x <$> normalize t <*> normalize m
     Apply m n -> do
         (normalize m >>=) $ ignoringAnnotations $ \case
-            -- TODO, we need to check that the type of n matches the expected
-            --       argument type.
             Lambda x t p -> normalize (subst x n p)
             m' -> Apply m' <$> normalize n
 
@@ -327,10 +322,6 @@ subst z p = \case
     substRecBind (x, t, m) | x == z    = bomb
                            | otherwise = (x, subst z p t, subst z p m)
 
--- TODO, when parsing and pretty-printing, it would be good to allow some
--- minor syntactic sugar for things like multi-variable lambdas and foralls,
--- and applications of more than two expressions.
-
 -- | Serialize an expression into a symbolic-expression; helpful for printing
 -- somewhat human readable representations of an expression.
 toSExpr :: (b -> String) -> Expr' b -> SExpr
@@ -409,9 +400,6 @@ fromSExpr = convertError . recurse
     reservedWords = ["let", "letrec", "forall", "lambda"]
     newError = throwError . (,) Nothing
     augmentError loc = \case
-        -- TODO, it would be good to print out the line(s) in which the
-        -- error occurs, along with a caret (^) and span (~) to make error
-        -- identification easier.
         (Nothing, msg) -> (Just $ "At location [" ++ show (sourceStartLine loc)
                                ++ ":" ++ show (sourceStartCol loc) ++ "]", msg)
         err -> err
