@@ -36,6 +36,9 @@ data Expr' b
 -- used for clarity's sake.
 type Type' = Expr'
 
+-- | A top-level declaration in a file.
+type Decl' b = (b, Expr' b)
+
 -- | Utility to split a lambda into a list of its arguments and its body.
 splitLambda :: Expr' b -> ([b], Expr' b)
 splitLambda = \case
@@ -57,6 +60,24 @@ splitApply = \case
 -- | Utility to convert a list of expressions into an application/
 unsplitApply :: [Expr' b] -> Expr' b
 unsplitApply = foldl1 Apply
+
+-- | Fold the variables in an expression. Useful for, for instance, determining
+-- the next available unique identifier. Folds from left to right.
+foldVars :: (a -> b -> a) -> a -> Expr' b -> a
+foldVars f start expr = recurse start expr
+  where
+    recurse acc = \case
+        Var x -> f acc x
+        Star -> acc
+        Let x m n -> recurse (recurse (f acc x) m) n
+        Letrec binds n ->
+            let (xs, ts, ms) = unzip3 binds in
+            recurse (foldl recurse (foldl recurse (foldl f acc xs) ts) ms) n
+        Forall x t s -> recurse (recurse (f acc x) t) s
+        Lambda x m -> recurse (f acc x) m
+        Apply m n -> recurse (recurse acc m) n
+        AnnotType m t -> recurse (recurse acc m) t
+        AnnotSource m s -> recurse acc m
 
 -- | The monad used for type checking. Includes:
 --

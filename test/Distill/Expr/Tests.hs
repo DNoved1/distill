@@ -1,9 +1,20 @@
-module Distill.Expr.Tests (tests) where
+module Distill.Expr.Tests
+    ( tests
+    , Expr
+    , Type
+    , Decl
+    , UniqueVar(..)
+    , WellTypedExpr(..)
+    , nextAvailableUnique
+    , arbitraryUniqueVar
+    , arbitraryExpr
+    , arbitraryType
+    ) where
 
 import Control.Monad.Reader
 import System.IO
 import Test.HUnit
-import Test.QuickCheck (Arbitrary(..), quickCheckResult)
+import Test.QuickCheck (Arbitrary(..), quickCheckWithResult, stdArgs, chatty)
 import Test.QuickCheck.Gen
 import Test.QuickCheck.Property
 import Text.Parsec (parse)
@@ -14,12 +25,14 @@ import Distill.Expr
 tests :: Test
 tests = TestLabel "Distill.Expr.Tests" $ TestList
     [ TestLabel "prop_exprsWellTyped" $ TestCase $
-        quickCheckResult prop_exprsWellTyped >>= resultToAssertion
+        resultToAssertion =<< quickCheckWithResult (stdArgs {chatty = False})
+            prop_exprsWellTyped
     , TestLabel "simpleTest" $ TestCase $ simpleTest
     ]
 
 type Expr = Expr' UniqueVar
 type Type = Type' UniqueVar
+type Decl = Decl' UniqueVar
 
 data UniqueVar = UniqueVar String Int
   deriving (Eq, Show, Read)
@@ -31,6 +44,12 @@ instance Arbitrary WellTypedExpr where
     arbitrary = do
         (_, m, _) <- arbitraryExpr [] 0
         return (WellTypedExpr m)
+
+-- | Determine the next unused integer available for forming 'UniqueVar's.
+nextAvailableUnique :: Expr -> Int
+nextAvailableUnique = foldVars f 0
+  where
+    f acc (UniqueVar _ num) = max acc (succ num)
 
 -- | Generate an arbitrary upto three-letter unique variable.
 arbitraryUniqueVar :: Int -> Gen (Int, UniqueVar)

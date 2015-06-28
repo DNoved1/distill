@@ -15,6 +15,7 @@ library
   exposed-modules:
     Distill.Expr
     Distill.SExpr
+    Distill.Transform
   build-depends:
     base >=4.8 && <4.9
    ,mtl
