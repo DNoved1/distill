@@ -15,6 +15,7 @@ import Distill.Expr.Tests hiding (tests)
 import Distill.SExpr
 import Distill.TestUtil
 import Distill.Transform
+import Distill.UniqueName
 
 tests :: Test
 tests = TestLabel "Distill.Transform.Tests" $ TestList
@@ -52,7 +53,7 @@ prop_lambdaLiftingCreatesSuperCombinators (ExprAndType (expr, type_)) =
         decls = lambdaLift
             renumberUnique
             (succ start)
-            [Decl' (UniqueVar "main" start) type_ expr]
+            [Decl' (UniqueName "main" start) type_ expr]
         (names, exprs) = unzip (map (\(Decl' x t m) -> (x, m)) decls)
         namesToIsSuper = zip names (map (isSuperCombinator names) exprs)
         combine acc (name, isSuper) = if isSuper then acc else name:acc
@@ -66,11 +67,9 @@ prop_lambdaLiftingCreatesSuperCombinators (ExprAndType (expr, type_)) =
                     ++ "\tWas lambda lifted into the following:\n"
                     ++ unlines (map showDecl decls)
                     ++ "\tThe following declarations are not supercombinators:\n"
-                    ++ unlines (map showUniqueVar nonSupers)
+                    ++ unlines (map prettyUnique nonSupers)
             }
   where
-    showExpr expr = render $ pprSExpr $ toSExpr showUniqueVar expr
+    showExpr expr = render $ pprSExpr $ toSExpr prettyUnique expr
     showDecl (Decl' x t m) = render $ pprSExpr $ List
-        [Atom "define", Atom (showUniqueVar x), toSExpr showUniqueVar m]
-    showUniqueVar (UniqueVar name num) = name ++ "$" ++ show num
-    renumberUnique (UniqueVar name _) num = UniqueVar name num
+        [Atom "define", Atom (prettyUnique x), toSExpr prettyUnique m]

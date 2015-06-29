@@ -1,6 +1,12 @@
 {-# LANGUAGE LambdaCase #-}
 
-module Distill.TestUtil where
+module Distill.TestUtil
+    ( resultToAssertion
+    , quickCheckToHUnit
+    , smaller
+    , parseSExprFile
+    , assertFalse
+    ) where
 
 import Data.Char
 import Test.HUnit hiding (Testable)
