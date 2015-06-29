@@ -37,39 +37,34 @@ isSuperCombinator bound expr =
         LambdaF{} -> False
         expr -> foldr (&&) True expr
 
-newtype ExprAndType = ExprAndType (Expr, Type)
+newtype Decls = Decls ([Decl], Int)
   deriving (Show, Read)
 
-instance Arbitrary ExprAndType where
+instance Arbitrary Decls where
     arbitrary = do
-        (_, m, t) <- arbitraryExpr [] 0
-        return (ExprAndType (m, t))
+        (s, decls) <- arbitraryDecls [] 0
+        return (Decls (decls, s))
 
 -- | The property that lamdba lifting a set of declarations should result
 -- in a set of declarations, all of which are supercombinators.
-prop_lambdaLiftingCreatesSuperCombinators :: ExprAndType -> Result
-prop_lambdaLiftingCreatesSuperCombinators (ExprAndType (expr, type_)) =
-    let start = nextAvailableUnique expr
-        decls = lambdaLift
-            renumberUnique
-            (succ start)
-            [Decl' (UniqueName "main" start) type_ expr]
-        (names, exprs) = unzip (map (\(Decl' x t m) -> (x, m)) decls)
+prop_lambdaLiftingCreatesSuperCombinators :: Decls -> Result
+prop_lambdaLiftingCreatesSuperCombinators (Decls (decls, nextUnique)) =
+    let decls' = lambdaLift renumberUnique nextUnique decls
+        (names, exprs) = unzip (map (\(Decl' x _ m) -> (x, m)) decls')
         namesToIsSuper = zip names (map (isSuperCombinator names) exprs)
-        combine acc (name, isSuper) = if isSuper then acc else name:acc
     in
     case foldl combine [] namesToIsSuper of
         [] -> succeeded
         nonSupers -> failed
             { reason = "Failed to lambda lift fully.\n"
-                    ++ "\tThe expression:\n"
-                    ++ showExpr expr ++ "\n"
-                    ++ "\tWas lambda lifted into the following:\n"
+                    ++ "\tThe declarations:\n"
                     ++ unlines (map showDecl decls)
+                    ++ "\tWere lambda lifted into the following:\n"
+                    ++ unlines (map showDecl decls')
                     ++ "\tThe following declarations are not supercombinators:\n"
                     ++ unlines (map prettyUnique nonSupers)
             }
   where
-    showExpr expr = render $ pprSExpr $ toSExpr prettyUnique expr
+    combine acc (name, isSuper) = if isSuper then acc else name:acc
     showDecl (Decl' x t m) = render $ pprSExpr $ List
         [Atom "define", Atom (prettyUnique x), toSExpr prettyUnique m]

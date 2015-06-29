@@ -41,6 +41,7 @@ type Type' = Expr'
 
 -- | A top-level declaration in a file.
 data Decl' b = Decl' b (Type' b) (Expr' b)
+  deriving (Show, Read)
 
 -- | Functor view of expressions.
 data Expr'F b a

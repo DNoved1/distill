@@ -3,6 +3,7 @@ module Distill.Expr.Tests
     , WellTypedExpr(..)
     , arbitraryExpr
     , arbitraryType
+    , arbitraryDecls
     ) where
 
 import System.IO
@@ -75,6 +76,18 @@ arbitraryType bound s = sized $ \size -> do
         (s, t) <- smaller $ arbitraryType bound s
         (s, t') <- smaller $ arbitraryType ((x, t):bound) s
         return (s, Forall x t t')
+
+-- | Generate an arbitrary set of declarations.
+arbitraryDecls :: [(UniqueName, Type)] -> Int -> Gen (Int, [Decl])
+arbitraryDecls bound s = sized (arbitraryDecls' bound s)
+  where
+    arbitraryDecls' _ s 0 = return (s, [])
+    arbitraryDecls' bound s n = do
+        (s, name) <- arbitraryUniqueName s
+        (s, expr, type_) <- arbitraryExpr bound s
+        let decl = Decl' name type_ expr
+        (s, decls) <- arbitraryDecls' ((name, type_):bound) s (pred n)
+        return (s, decl:decls)
 
 -- | The property that generated expressions are well-typed.
 prop_exprsWellTyped :: WellTypedExpr -> Result
