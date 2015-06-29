@@ -3,6 +3,7 @@
 
 module Distill.Transform.Tests (tests) where
 
+import Data.Functor.Foldable
 import Data.List ((\\))
 import Test.HUnit
 import Test.QuickCheck hiding (Result, reason)
@@ -17,9 +18,8 @@ import Distill.Transform
 
 tests :: Test
 tests = TestLabel "Distill.Transform.Tests" $ TestList
-    [ TestLabel "prop_lambdaLiftingCreatesSuperCombinators" $ TestCase $
-        resultToAssertion =<< quickCheckWithResult (stdArgs {chatty = False})
-            prop_lambdaLiftingCreatesSuperCombinators
+    [ TestLabel "prop_lambdaLiftingCreatesSuperCombinators" $
+        quickCheckToHUnit prop_lambdaLiftingCreatesSuperCombinators
     ]
 
 -- | Check that an expression is in supercombinator form, assuming a set of
@@ -32,14 +32,9 @@ isSuperCombinator bound expr =
             and (noLambdaIn body : map (noLambdaIn . snd) args)
         _ -> noLambdaIn expr
   where
-    noLambdaIn = \case
-        Var x -> True
-        Star -> True
-        Let x m n -> noLambdaIn m && noLambdaIn n
-        Forall x t s -> noLambdaIn t && noLambdaIn s
-        Lambda{} -> False
-        Apply m n -> noLambdaIn m && noLambdaIn n
-        AnnotSource m s -> noLambdaIn m
+    noLambdaIn = cata $ \case
+        LambdaF{} -> False
+        expr -> foldr (&&) True expr
 
 newtype ExprAndType = ExprAndType (Expr, Type)
   deriving (Show, Read)
@@ -53,25 +48,25 @@ instance Arbitrary ExprAndType where
 -- in a set of declarations, all of which are supercombinators.
 prop_lambdaLiftingCreatesSuperCombinators :: ExprAndType -> Result
 prop_lambdaLiftingCreatesSuperCombinators (ExprAndType (expr, type_)) =
-    let uniqueStart = nextAvailableUnique expr
+    let start = nextAvailableUnique expr
         decls = lambdaLift
             renumberUnique
-            (succ uniqueStart)
-            [Decl' (UniqueVar "main" uniqueStart) type_ expr]
+            (succ start)
+            [Decl' (UniqueVar "main" start) type_ expr]
         (names, exprs) = unzip (map (\(Decl' x t m) -> (x, m)) decls)
         namesToIsSuper = zip names (map (isSuperCombinator names) exprs)
         combine acc (name, isSuper) = if isSuper then acc else name:acc
     in
     case foldl combine [] namesToIsSuper of
         [] -> succeeded
-        xs -> failed
+        nonSupers -> failed
             { reason = "Failed to lambda lift fully.\n"
                     ++ "\tThe expression:\n"
                     ++ showExpr expr ++ "\n"
                     ++ "\tWas lambda lifted into the following:\n"
                     ++ unlines (map showDecl decls)
                     ++ "\tThe following declarations are not supercombinators:\n"
-                    ++ unlines (map showUniqueVar xs)
+                    ++ unlines (map showUniqueVar nonSupers)
             }
   where
     showExpr expr = render $ pprSExpr $ toSExpr showUniqueVar expr

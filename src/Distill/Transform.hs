@@ -1,15 +1,18 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE ViewPatterns #-}
 
--- | Transformations on distilled expressions. Expressions should be renumbered
--- and type checked before transforming them, in general.
+-- | Transformations on distilled expressions. Before transforming expressions,
+-- they should first be renumbered, type checked, and had their source
+-- annotations deleted.
 module Distill.Transform
     ( lambdaLift
     ) where
 
-import Control.Arrow ((&&&), second)
+import Control.Arrow
 import Control.Monad.Reader
 import Control.Monad.State
+import Data.Functor.Foldable
 import Data.List ((\\))
 import Data.Maybe (fromJust)
 
@@ -18,62 +21,59 @@ import Distill.Expr
 -- | Lambda-lift a set of declarations into supercombinator form.
 lambdaLift :: Eq b => (b -> Int -> b) -> Int -> [Decl' b] -> [Decl' b]
 lambdaLift ctor start decls =
-    let state = mapM_ (lambdaLift' ctor) decls in
+    let declTypes = map (\(Decl' x t _) -> (x, t)) decls
+        state = mapM_ (lambdaLift' ctor declTypes) decls in
     snd $ snd $ runState state (start, [])
 
-lambdaLift' :: Eq b => (b -> Int -> b) -> Decl' b -> State (Int, [Decl' b]) ()
-lambdaLift' ctor (Decl' x t m) = do
-    m' <- runReaderT (lambdaLiftTop m) (x, [])
-    modify (\(num, decls) -> (num, (Decl' x t m'):decls))
+-- | Lambda-lifts a single declaration into supercombinator form.
+lambdaLift' :: Eq b => (b -> Int -> b) -> [(b, Type' b)] -> Decl' b
+            -> State (Int, [Decl' b]) ()
+lambdaLift' ctor assumed (Decl' x t m) = do
+    m' <- runReaderT (lambdaLiftOuter m) (x, assumed)
+    addDecl (Decl' x t m')
     return ()
   where
-    lambdaLiftTop = \case
-        Lambda x t m -> do
-            let (args, body) = splitLambda (Lambda x t m)
+    -- Lift a lambda assuming we are at the top level.
+    lambdaLiftOuter = \case
+        lambda@Lambda{} -> do
+            let (args, body) = splitLambda lambda
+            let (xs, ts) = unzip args
+            ts' <- mapM lambdaLiftInner ts
+            let args' = zip xs ts'
             body' <- assumeArgs args $ lambdaLiftInner body
-            return (unsplitLambda (args, body'))
-        AnnotSource m s -> AnnotSource <$> lambdaLiftTop m <*> pure s
+            return (unsplitLambda args' body')
         expr -> lambdaLiftInner expr
+    -- Lift a lambda assuming we are inside another expression.
     lambdaLiftInner = \case
-        Var x -> return (Var x)
-        Star -> return Star
-        Let x m n -> Let x <$> lambdaLiftInner m <*> lambdaLiftInner n
-        Forall x t s -> Forall x <$> lambdaLiftInner t <*> lambdaLiftInner s
-        Lambda x t m -> do
-            newExpr <- lambdaLiftTop (Lambda x t m)
-            boundIn <- boundVars
-            let freeIn = freeVars newExpr \\ boundIn
-            args <- createArgs freeIn
-            let newExpr' = unsplitLambda (args, newExpr)
-            newType <- typeof newExpr'
-            name <- getName
-            (num, decls) <- get
-            let newName = ctor name num
-            let newDecl = Decl' newName newType newExpr'
-            put (succ num, newDecl:decls)
-            return (unsplitApply (Var newName : map Var freeIn))
-        Apply m n -> Apply <$> lambdaLiftInner m <*> lambdaLiftInner n
-        AnnotSource m s -> AnnotSource <$> lambdaLiftInner m <*> pure s
-    boundVars = do
-        (num, decls) <- get
-        return (map (\(Decl' name _ _) -> name) decls)
+        lambda@Lambda{} -> do
+            base <- lambdaLiftOuter lambda
+            freeArgs <- (freeVars base \\) <$> boundVars
+            completed <- unsplitLambda <$> createArgs freeArgs <*> pure base
+            type_ <- typeof completed
+            name <- createName
+            addDecl (Decl' name type_ completed)
+            return (unsplitApply (Var name : map Var freeArgs))
+        expr -> embed <$> sequence (lambdaLiftInner <$> project expr)
+    -- Determine the set of variables bound by declarations.
+    boundVars = map (\(Decl' x _ _) -> x) <$> snd <$> get
+    -- Assume a set of arguments are a set of types in a sub-computation.
     assumeArgs args = local (second (args ++))
+    -- Create a new unique name for a declaration to use.
+    createName = ctor <$> (fst <$> ask) <*> (fst <$> get <* modify (first succ))
+    -- Add a newly created declaration to the set of declarations.
+    addDecl decl = modify (second (decl:))
+    -- Creates a list of (Var, Type) pairs, used as arguments for a lambda.
     createArgs names = do
-        (_, boundArgs) <- ask
-        -- This will throw an error in the case that there are free variables
-        -- in an expression, however it should not happen since type-checking
-        -- is a precondition to calling 'lambdaLift'
-        return (map (id &&& fromJust . flip lookup boundArgs) names)
-    getName = fst <$> ask
+        assumed <- snd <$> ask
+        return (map (id &&& fromJust . flip lookup assumed) names)
+    -- Determine the type of an expression.
     typeof expr = do
-        (_, boundArgs) <- ask
-        (_, decls) <- get
-        let assumed = boundArgs ++ map (\(Decl' x t _) -> (x, t)) decls
-        let defined = map (\(Decl' x _ m) -> (x, m)) decls
-        -- Again, error in the case that the expression is not type-correct.
-        return (fromRight (runTCM (inferType expr) assumed defined))
-
-fromRight :: Either a b -> b
-fromRight = \case
-    Right b -> b
-    Left  _ -> error "Unwrapping right failed in 'fromRight'."
+        assumed <- snd <$> ask
+        decls <- snd <$> get
+        let assumed' = assumed ++ map (\(Decl' x t _) -> (x, t)) decls
+        let defined' = map (\(Decl' x _ m) -> (x, m)) decls
+        return (fromRight (runTCM (inferType expr) assumed' defined'))
+    -- Extract a value from an either, assuming it is correct.
+    fromRight = \case
+        Right b -> b
+        Left  _ -> error "'fromRight'"

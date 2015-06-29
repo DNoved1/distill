@@ -14,7 +14,7 @@ module Distill.Expr.Tests
 import Control.Monad.Reader
 import System.IO
 import Test.HUnit
-import Test.QuickCheck (Arbitrary(..), quickCheckWithResult, stdArgs, chatty)
+import Test.QuickCheck (Arbitrary(..))
 import Test.QuickCheck.Gen
 import Test.QuickCheck.Property
 import Text.Parsec (parse)
@@ -24,10 +24,8 @@ import Distill.Expr
 
 tests :: Test
 tests = TestLabel "Distill.Expr.Tests" $ TestList
-    [ TestLabel "prop_exprsWellTyped" $ TestCase $
-        resultToAssertion =<< quickCheckWithResult (stdArgs {chatty = False})
-            prop_exprsWellTyped
-    , TestLabel "simpleTest" $ TestCase $ simpleTest
+    [ TestLabel "prop_exprsWellTyped" $ quickCheckToHUnit prop_exprsWellTyped
+    , TestLabel "simpleTest" $ simpleTest
     ]
 
 type Expr = Expr' UniqueVar
@@ -47,9 +45,9 @@ instance Arbitrary WellTypedExpr where
 
 -- | Determine the next unused integer available for forming 'UniqueVar's.
 nextAvailableUnique :: Expr -> Int
-nextAvailableUnique = foldVars f 0
+nextAvailableUnique = foldr f 0
   where
-    f acc (UniqueVar _ num) = max acc (succ num)
+    f (UniqueVar _ num) acc = max (succ num) acc
 
 -- | Generate an arbitrary upto three-letter unique variable.
 arbitraryUniqueVar :: Int -> Gen (Int, UniqueVar)
@@ -106,24 +104,23 @@ arbitraryType bound s = sized $ \size -> do
 -- | The property that generated expressions are well-typed.
 prop_exprsWellTyped :: WellTypedExpr -> Result
 prop_exprsWellTyped (WellTypedExpr expr) =
-    --let renumbered = renumber UniqueVar 0 [] expr in
     case runTCM (inferType expr) [] [] of
-        Left err -> failed {reason = err}
         Right _  -> succeeded
+        Left err -> failed {reason = err}
 
 -- | A simple test on parsing and type-checking a file.
-simpleTest :: Assertion
-simpleTest = do
+simpleTest :: Test
+simpleTest = TestCase $ do
     let fileName = "./test/simple.distill"
     withFile fileName ReadMode $ \file -> do
         contents <- hGetContents file
         let parsed = parse parseSExprFile fileName contents
         sexpr <- case parsed of
-            Left err -> assertFailure (show err) >> undefined
+            Left err -> assertFalse (show err)
             Right sexpr -> return sexpr
         expr <- case fromSExpr sexpr of
-            Left err -> assertFailure err >> undefined
+            Left err -> assertFalse err
             Right expr -> return expr
         case runTCM (inferType expr) [] [] of
-            Left err -> assertFailure err >> undefined
-            Right type_ -> return ()
+            Left err -> assertFalse err
+            Right _ -> return ()
