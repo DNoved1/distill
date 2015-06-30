@@ -76,6 +76,16 @@ instance RS.Unfoldable (Expr' b) where
         ApplyF m n       -> Apply m n
         AnnotSourceF m s -> AnnotSource m s
 
+-- | Utility to split a let expression into a list of its binds and body.
+splitLet :: Expr' b -> ([(b, Expr' b)], Expr' b)
+splitLet = \case
+    Let x m n -> first ((x,m):) (splitLet n)
+    n         -> ([], n)
+
+-- | Utility to create a let expression from a list of its binds and body.
+unsplitLet :: [(b, Expr' b)] -> Expr' b -> Expr' b
+unsplitLet binds body = foldr ($) body (map (uncurry Let) binds)
+
 -- | Utility to split a forall into a list of its argument types and body.
 splitForall :: Type' b -> ([(b, Type' b)], Type' b)
 splitForall = \case

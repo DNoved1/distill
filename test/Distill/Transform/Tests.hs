@@ -3,6 +3,7 @@
 
 module Distill.Transform.Tests (tests) where
 
+import Control.Monad.State
 import Data.Functor.Foldable
 import Data.List ((\\))
 import Test.HUnit
@@ -21,6 +22,8 @@ tests :: Test
 tests = TestLabel "Distill.Transform.Tests" $ TestList
     [ TestLabel "prop_lambdaLiftingCreatesSuperCombinators" $
         quickCheckToHUnit prop_lambdaLiftingCreatesSuperCombinators
+    , TestLabel "prop_aNormalizationPreservesTypes" $
+        quickCheckToHUnit prop_aNormalizationPreservesTypes
     ]
 
 -- | Check that an expression is in supercombinator form, assuming a set of
@@ -68,3 +71,46 @@ prop_lambdaLiftingCreatesSuperCombinators (Decls (decls, nextUnique)) =
     combine acc (name, isSuper) = if isSuper then acc else name:acc
     showDecl (Decl' x t m) = render $ pprSExpr $ List
         [Atom "define", Atom (prettyUnique x), toSExpr prettyUnique m]
+
+-- | The property that A-Normalization of expressions should not change the
+-- typeability or type of an expression.
+prop_aNormalizationPreservesTypes :: WellTypedExpr -> Result
+prop_aNormalizationPreservesTypes (WellTypedExpr expr) =
+    let type1 = fromRight (runTCM (inferType expr) [] [])
+        start = nextAvailableUnique expr
+        expr' = evalState (aNormalizeExpr (UniqueName "ANF") expr) start
+        maybeType2 = runTCM (inferType expr) [] []
+    in
+    case maybeType2 of
+        Right type2 -> case runTCM (checkEqual type1 type2) [] [] of
+            Right () -> succeeded
+            Left err -> failed
+                { reason = "Failed to check that the type of an expression "
+                        ++ "after A-Normalization is equivalent to the type "
+                        ++ "from before.\n"
+                        ++ showExprBeforeAndAfter expr expr'
+                        ++ showTypeBeforeAndAfter type1 type2
+                        ++ "\tThe error was:\n"
+                        ++ err
+                }
+        Left err -> failed
+            { reason = "Failed to type-check an expression after it was "
+                    ++ "A-Normalized.\n"
+                    ++ showExprBeforeAndAfter expr expr'
+                    ++ "\tThe type error was:\n"
+                    ++ err
+            }
+  where
+    fromRight (Right b) = b
+    fromRight (Left  _) = error "'fromRight'"
+    showExprBeforeAndAfter before after =
+           "\tStarted with the expression:\n"
+        ++ showExpr before ++ "\n"
+        ++ "\tAfter A-Normalization, the expression became:\n"
+        ++ showExpr after ++ "\n"
+    showTypeBeforeAndAfter before after =
+           "\tThe expression originally had the type:\n"
+        ++ showExpr before ++ "\n"
+        ++ "\tAfter A-Normalization, the expression had type:\n"
+        ++ showExpr after ++ "\n"
+    showExpr = render . pprSExpr . toSExpr prettyUnique

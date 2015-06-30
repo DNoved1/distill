@@ -1,12 +1,12 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE LambdaCase #-}
-{-# LANGUAGE ViewPatterns #-}
 
 -- | Transformations on distilled expressions. Before transforming expressions,
 -- they should first be renumbered, type checked, and had their source
 -- annotations deleted.
 module Distill.Transform
     ( lambdaLift
+    , aNormalizeExpr
     ) where
 
 import Control.Arrow
@@ -77,3 +77,35 @@ lambdaLift' ctor assumed (Decl' x t m) = do
     fromRight = \case
         Right b -> b
         Left  _ -> error "'fromRight'"
+
+-- | Translate an expression into administrative normal form.
+aNormalizeExpr :: (Int -> b) -> Expr' b -> State Int (Expr' b)
+aNormalizeExpr ctor = aNormalizeOuter
+  where
+    -- Normalize expressions to A-normal form; assumes we are not in an apply.
+    aNormalizeOuter expr = do
+        (lets, expr') <- aNormalizeInner expr
+        return (unsplitLet lets expr')
+    -- Normalize expressions to simple values; this assumes we are in an apply.
+    aNormalizeInner = \case
+        Var x -> return ([], Var x)
+        Star -> return ([], Star)
+        Let x m n -> do
+            (mlets, m') <- aNormalizeInner m
+            (nlets, n') <- aNormalizeInner n
+            return (mlets ++ [(x, m')] ++ nlets, n')
+        Forall x t s -> do
+            (tlets, t') <- aNormalizeInner t
+            s' <- aNormalizeOuter s
+            return (tlets, Forall x t' s')
+        Lambda x t m -> do
+            (tlets, t') <- aNormalizeInner t
+            m' <- aNormalizeOuter m
+            return (tlets, Lambda x t' m')
+        apply@Apply{} -> do
+            let args = splitApply apply
+            (lets, args') <- unzip <$> mapM aNormalizeInner args
+            let apply' = unsplitApply args'
+            name <- createName
+            return (concat lets ++ [(name, apply')], Var name)
+    createName = ctor <$> (get <* modify succ)
