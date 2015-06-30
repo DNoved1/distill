@@ -12,7 +12,7 @@ module Distill.SExpr
 
 import Text.Parsec
 import Text.Parsec.String (Parser)
-import Text.PrettyPrint (Doc, text, parens, hsep)
+import Text.PrettyPrint (Doc, parens, sep, text)
 
 -- | Source location information, mainly used for helpful error messages.
 data SourceLoc = SourceLoc
@@ -68,5 +68,5 @@ parseSExpr allowedAtomChar = parseAtom <|> parseList
 pprSExpr :: SExpr -> Doc
 pprSExpr = \case
     Atom atom  -> text atom
-    List exprs -> parens $ hsep $ map pprSExpr exprs
+    List exprs -> parens $ sep $ map pprSExpr exprs
     At expr _  -> pprSExpr expr
