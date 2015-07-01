@@ -11,7 +11,8 @@ import Test.HUnit
 import Test.QuickCheck (Arbitrary(..))
 import Test.QuickCheck.Gen
 import Test.QuickCheck.Property
-import Text.Parsec (parse)
+import Text.Parsec
+import Text.PrettyPrint hiding (char)
 
 import Distill.Expr
 import Distill.TestUtil
@@ -22,6 +23,7 @@ tests :: Test
 tests = TestLabel "Distill.Expr.Tests" $ TestList
     [ TestLabel "prop_exprsWellTyped" $ quickCheckToHUnit prop_exprsWellTyped
     , TestLabel "simpleTest" $ simpleTest
+    , TestLabel "prop_parsePprInverses" $ quickCheckToHUnit prop_parsePprInverses
     ]
 
 newtype WellTypedExpr = WellTypedExpr Expr
@@ -102,13 +104,42 @@ simpleTest = TestCase $ do
     let fileName = "./test/simple.distill"
     withFile fileName ReadMode $ \file -> do
         contents <- hGetContents file
-        let parsed = parse parseSExprFile fileName contents
-        sexpr <- case parsed of
+        let parsed = parse parseExprFile fileName contents
+        expr <- case parsed of
             Left err -> assertFalse (show err)
-            Right sexpr -> return sexpr
-        expr <- case fromSExpr sexpr of
-            Left err -> assertFalse err
             Right expr -> return expr
         case runTCM (inferType expr) [] [] of
             Left err -> assertFalse err
             Right _ -> return ()
+
+-- | The property that parsing and pretty-printing are inverse functions.
+prop_parsePprInverses :: WellTypedExpr -> Result
+prop_parsePprInverses (WellTypedExpr expr) =
+    let pprinted = render (pprExpr pprUnique expr)
+        parsed = parse (parseExpr "%No-Name%" parseVar) "" pprinted
+    in case parsed of
+        Left err -> failed
+            { reason = "Failed to parse pretty-printed expr.\n"
+                    ++ introSpiel pprinted
+                    ++ "\tWhile parsing, the following error occured:\n"
+                    ++ show err
+            }
+        Right expr' ->
+            let renumbered = renumber UniqueName 0 [] expr'
+            in case runTCM (checkEqual expr renumbered) [] [] of
+                    Left err -> failed
+                        { reason = "Failed to check original expression was "
+                                ++ "equal to pretty-printed and parsed "
+                                ++ "expression.\n"
+                                ++ introSpiel pprinted
+                                ++ "\tWhile checking expressions to be equal, "
+                                ++ "the following error occured:\n"
+                                ++ err
+                        }
+                    Right () -> succeeded
+  where
+    parseVar = many1 (alphaNum <|> char '$')
+    introSpiel pprinted = "\tStarted with the expression:\n"
+                       ++ show expr ++ "\n"
+                       ++ "\tWhich was pretty-printed as:\n"
+                       ++ pprinted ++ "\n"

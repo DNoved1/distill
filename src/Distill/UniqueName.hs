@@ -7,8 +7,10 @@ module Distill.UniqueName
     , Decl
     , nextAvailableUnique
     , renumberUnique
-    , prettyUnique
+    , pprUnique
     ) where
+
+import Text.PrettyPrint
 
 import Distill.Expr
 
@@ -16,8 +18,11 @@ import Distill.Expr
 data UniqueName = UniqueName String Int
   deriving (Show, Read, Eq, Ord)
 
+-- | Expressions specialized on unique names.
 type Expr = Expr' UniqueName
+-- | Types specialized on unique names.
 type Type = Type' UniqueName
+-- | Declarations specialized on unique names.
 type Decl = Decl' UniqueName
 
 -- | Determine the next unused integer available for forming a unique name.
@@ -30,6 +35,6 @@ nextAvailableUnique = foldr f 0
 renumberUnique :: UniqueName -> Int -> UniqueName
 renumberUnique (UniqueName name _) num = UniqueName name num
 
--- | Show a unique name in a human-readable way.
-prettyUnique :: UniqueName -> String
-prettyUnique (UniqueName name num) = name ++ "$" ++ show num
+-- | Pretty print a unique name.
+pprUnique :: UniqueName -> Doc
+pprUnique (UniqueName name num) = text name <> char '$' <> int num

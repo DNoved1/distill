@@ -13,7 +13,6 @@ import Text.PrettyPrint
 
 import Distill.Expr
 import Distill.Expr.Tests hiding (tests)
-import Distill.SExpr
 import Distill.TestUtil
 import Distill.Transform
 import Distill.UniqueName
@@ -65,12 +64,12 @@ prop_lambdaLiftingCreatesSuperCombinators (Decls (decls, nextUnique)) =
                     ++ "\tWere lambda lifted into the following:\n"
                     ++ unlines (map showDecl decls')
                     ++ "\tThe following declarations are not supercombinators:\n"
-                    ++ unlines (map prettyUnique nonSupers)
+                    ++ unlines (map (render . pprUnique) nonSupers)
             }
   where
     combine acc (name, isSuper) = if isSuper then acc else name:acc
-    showDecl (Decl' x t m) = render $ pprSExpr $ List
-        [Atom "define", Atom (prettyUnique x), toSExpr prettyUnique m]
+    showDecl (Decl' x t m) =
+        render $ text "define" <+> pprUnique x <+> pprExpr pprUnique m
 
 -- | The property that A-Normalization of expressions should not change the
 -- typeability or type of an expression.
@@ -113,4 +112,4 @@ prop_aNormalizationPreservesTypes (WellTypedExpr expr) =
         ++ showExpr before ++ "\n"
         ++ "\tAfter A-Normalization, the expression had type:\n"
         ++ showExpr after ++ "\n"
-    showExpr = render . pprSExpr . toSExpr prettyUnique
+    showExpr = render . pprExpr pprUnique

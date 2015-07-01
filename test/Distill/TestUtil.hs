@@ -4,7 +4,7 @@ module Distill.TestUtil
     ( resultToAssertion
     , quickCheckToHUnit
     , smaller
-    , parseSExprFile
+    , parseExprFile
     , assertFalse
     ) where
 
@@ -15,7 +15,7 @@ import qualified Test.QuickCheck as QC
 import Text.Parsec
 import Text.Parsec.String
 
-import Distill.SExpr
+import Distill.Expr
 
 -- | Convert a QuickCheck Result into a HUnit Assertion.
 resultToAssertion :: QC.Result -> Assertion
@@ -33,10 +33,10 @@ smaller :: Gen a -> Gen a
 smaller = scale (`div` 2)
 
 -- | Parse the entirety of a file as an sexpr.
-parseSExprFile :: Parser SExpr
-parseSExprFile = parseSExpr allowedChars <* eof
+parseExprFile :: Parser (Expr' String)
+parseExprFile = parseExpr "%No-Name%" parseVar <* eof
   where
-    allowedChars c = isAlphaNum c || c `elem` ":*"
+    parseVar = many1 (satisfy isAlphaNum)
 
 -- | A wrapper around 'assertFailure' which is of any type.
 assertFalse :: String -> IO a

@@ -7,7 +7,6 @@ import Data.Char
 import Text.Parsec
 
 import Distill.Expr
-import Distill.SExpr
 import Distill.UniqueName
 
 type InterpretM = StateT InterpretState IO
@@ -27,13 +26,12 @@ startInterpretState = InterpretState
 
 parseExprFromLine :: String -> Either String (Expr' String)
 parseExprFromLine line = do
-    let parsed = parse (parseSExpr allowedChars <* eof) "<stdin>" line
-    sexpr <- case parsed of
+    let parsed = parse (parseExpr "%No-Name%" parseVar <* eof) "<stdin>" line
+    case parsed of
         Left err -> throwError (show err)
-        Right sexpr -> return sexpr
-    fromSExpr sexpr
+        Right expr -> return expr
   where
-    allowedChars c = isAlphaNum c || c == '*'
+    parseVar = many1 (satisfy isAlphaNum)
 
 printHelp :: IO ()
 printHelp = putStrLn $
@@ -82,9 +80,9 @@ interpreterLoop = do
             defined_ <- defined <$> get
             flip mapM_ defined_ $ \(name, expr) -> do
                 lift . putStr $ "define "
-                lift . putStr $ prettyUnique name
+                lift . print $ pprUnique name
                 lift . putStr $ " "
-                lift . print $ pprSExpr (toSExpr prettyUnique expr)
+                lift . print $ pprExpr pprUnique expr
         cmd:_ -> do
             lift . putStrLn $ "Unknown command '" ++ cmd ++ "'."
         [] -> return ()

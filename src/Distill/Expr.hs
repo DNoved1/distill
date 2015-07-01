@@ -6,18 +6,51 @@
 {-# LANGUAGE ViewPatterns #-}
 
 -- | Distilled expressions.
-module Distill.Expr where
+module Distill.Expr
+    (
+    -- * Data types
+      Expr'(..)
+    , Type'
+    , Decl'(..)
+    , Expr'F(..)
+    , SourceLoc(..)
+    -- ** Data views/utilities
+    , splitLet
+    , unsplitLet
+    , splitForall
+    , unsplitForall
+    , splitLambda
+    , unsplitLambda
+    , splitApply
+    , unsplitApply
+    , ignoringSource
+    , deleteSourceAnnotations
+    -- * Type checking
+    , TCM
+    , runTCM
+    , checkType
+    , inferType
+    , checkEqual
+    , normalize
+    , freeVars
+    , renumber
+    , subst
+    -- * Pretty-printing and Parsing
+    , pprExpr
+    , parseExpr
+    ) where
 
-import Control.Arrow
+import Control.Arrow hiding ((<+>))
 import Control.Monad.Except
 import Control.Monad.Reader
 import Control.Monad.State
 import Data.Functor.Foldable hiding (Foldable, Unfoldable)
 import qualified Data.Functor.Foldable as RS
-import Data.List (delete, union)
+import Data.List (delete, intersperse, union)
 import Data.Maybe (fromJust)
-
-import Distill.SExpr
+import Text.Parsec hiding (char)
+import Text.Parsec.String
+import Text.PrettyPrint
 
 -- | Dependently-typed lambda calculus expressions ranging over b, the type of
 -- binders.
@@ -75,6 +108,16 @@ instance RS.Unfoldable (Expr' b) where
         LambdaF x t m    -> Lambda x t m
         ApplyF m n       -> Apply m n
         AnnotSourceF m s -> AnnotSource m s
+
+-- | Source location information, mainly used for helpful error messages.
+data SourceLoc = SourceLoc
+    { sourceFile        :: String
+    , sourceStartCol    :: Int
+    , sourceStartLine   :: Int
+    , sourceEndCol      :: Int
+    , sourceEndLine     :: Int
+    }
+  deriving (Show, Read)
 
 -- | Utility to split a let expression into a list of its binds and body.
 splitLet :: Expr' b -> ([(b, Expr' b)], Expr' b)
@@ -306,77 +349,118 @@ subst z p = cata $ \case
   where
     bomb = error "Substituting through non-unique identifiers."
 
--- | Serialize an expression into a symbolic-expression; helpful for printing
--- somewhat human readable representations of an expression.
-toSExpr :: (b -> String) -> Expr' b -> SExpr
-toSExpr showIdent = recurse
+-- | Pretty print an expression.
+pprExpr :: Eq b => (b -> Doc) -> Expr' b -> Doc
+pprExpr pprVar = recurse
   where
-    recurse = \case
-        Var x -> Atom (showIdent x)
-        Star -> Atom "*"
+    recurse = ignoringSource >>> \case
+        Var x -> pprVar x
+        Star -> char '*'
         Let x m n ->
-            List [Atom "let", Atom (showIdent x), recurse m, recurse n]
+            hsep [text "let", pprVar x, equals, recurse m, text "in"]
+            $$ recurse n
         forall@Forall{} ->
-            let (args, body) = splitForall forall in
-            List [Atom "forall", List (map argToSExpr args), recurse body]
+            let (args, body) = splitForall forall
+                isDependent = snd $ foldr
+                    (\(x, t) (free, acc) ->
+                        (freeVars t `union` delete x free, (x `elem` free):acc))
+                    (freeVars body, [])
+                    args
+                isAtomic = map (isAtomicExpr . snd) args
+                args' = map pprForallArg (zip3 args isDependent isAtomic)
+                body' = (parensIf . not . isAtomicExpr) body (recurse body)
+            in hsep (intersperse (text "->") (args' ++ [body']))
         lambda@Lambda{} ->
-            let (args, body) = splitLambda lambda in
-            List [Atom "lambda", List (map argToSExpr args), recurse body]
+            let (args, body) = splitLambda lambda
+                args' = map pprLambdaArg args
+                body' = nest 4 (recurse body)
+            in char '\\' <> hsep args' <> char '.' $$ body'
         apply@Apply{} ->
-            let args = splitApply apply in
-            List (map recurse args)
-        AnnotSource m s -> At (recurse m) s
-    argToSExpr (x, t) = List [Atom (showIdent x), recurse t]
+            let args = splitApply apply
+                isAtomic = map isAtomicExpr args
+                args' = map pprApplyArg (zip args isAtomic)
+            in hsep args'
+    parensIf cond = if cond then parens else id
+    pprForallArg ((x, t), dependent, atomic) =
+        let wrapper = parensIf (not atomic)
+            body = if dependent
+                then pprVar x <+> colon <+> recurse t
+                else recurse t
+        in wrapper body
+    pprLambdaArg (x, t) = parens $ pprVar x <+> colon <+> recurse t
+    pprApplyArg (m, atomic) =
+        let wrapper = parensIf (not atomic)
+        in wrapper (recurse m)
+    isAtomicExpr = \case
+        Var _ -> True
+        Star  -> True
+        _     -> False
 
--- | Unserialize an expression from a symbolic-expression; helpful for reading
--- in expressions from text files.
-fromSExpr :: SExpr -> Either String (Expr' String)
-fromSExpr = convertError . recurse
+
+-- | Parse an expression. The first argument is the name to give to
+-- non-dependent function types.
+parseExpr :: b -> Parser b -> Parser (Expr' b)
+parseExpr defaultName parseVar' = recurse
   where
-    recurse = \case
-        Atom "*" -> return Star
-        Atom x -> if x `elem` reservedWords
-            then newError $ "'" ++ x ++ "' is a reserved word."
-            else return (Var x)
-        List [] -> newError "'()' is not a valid expression."
-        List (f:args) -> case ignoringAt f of
-            Atom "let" -> case args of
-                [ignoringAt -> Atom x, m, n] ->
-                    Let x <$> recurse m <*> recurse n
-                _ -> newError $ "'let' must be applied to three arguments, "
-                             ++ "the first of which must be an atom."
-            Atom "forall" -> case args of
-                [ignoringAt -> List binds, s] -> if not (null binds)
-                    then unsplitForall <$> mapM argsFromSExpr binds
-                                       <*> recurse s
-                    else newError "'forall' must have at least one binder."
-                _ -> newError $ "'forall' must be applied to three arguments, "
-                             ++ "the first of which must be an atom."
-            Atom "lambda" -> case args of
-                [ignoringAt -> List binds, m] -> if not (null binds)
-                    then unsplitLambda <$> mapM argsFromSExpr binds
-                                       <*> recurse m
-                    else newError "'lambda' must have at least one binder."
-                _ -> newError $ "'lambda' must be applied to two arguments, "
-                             ++ "the first of which must be an atom."
-            _ -> case args of
-                [] -> newError "Cannot apply zero arguments to an expression."
-                _ -> unsplitApply <$> mapM recurse (f:args)
-        At expr loc ->
-            catchError
-                (AnnotSource <$> recurse expr <*> pure loc)
-                (throwError . augmentError loc)
-    argsFromSExpr = \case
-        (ignoringAt -> List [ignoringAt -> Atom x, t]) -> (,) x <$> recurse t
-        _ -> newError $ "Arguments in a 'lambda' must be a two element list, "
-                     ++ "the first of which must be an atom."
-    reservedWords = ["let", "forall", "lambda"]
-    newError = throwError . (,) Nothing
-    augmentError loc = \case
-        (Nothing, msg) -> (Just $ "At location [" ++ show (sourceStartLine loc)
-                               ++ ":" ++ show (sourceStartCol loc) ++ "]", msg)
-        err -> err
-    convertError = \case
-        Left (Nothing, msg) -> Left msg
-        Left (Just loc, msg) -> Left (msg ++ "\n\t" ++ loc)
-        Right result -> Right result
+    recurse = parseArrowed
+    parseAtomic = withSource $ choice
+        [ parens recurse
+        , pure Star <* literal "*"
+        -- Uses backtracking because we don't want the variable parser to
+        -- pick up reserved words, such as 'let'.
+        , try $ do
+            isLet <- optionMaybe (try (string "let"))
+            case isLet of
+                Just _ -> fail "'let' is a reserved word."
+                Nothing -> Var <$> parseVar
+        ]
+    parseBasic = withSource $ choice
+        [ parseAtomic
+        , do
+            literal "let"
+            x <- parseVar
+            literal "="
+            m <- recurse
+            literal "in"
+            n <- recurse
+            return (Let x m n)
+        , do
+            literal "\\"
+            args <- many1 parseArg
+            literal "."
+            body <- recurse
+            return (unsplitLambda args body)
+        ]
+    parseApplied = withSource $ do
+        args <- many1 parseBasic
+        return (unsplitApply args)
+    parseArrowed = withSource $ do
+        argsAndBody <- flip sepBy1 (literal "->") $ choice
+            [ try parseArg -- Uses backtracking because it starts with '(',
+                           -- just like a parenthesized atomic expression.
+            , (,) defaultName <$> parseApplied
+            ]
+        return $ if null (tail argsAndBody)
+            then snd (head argsAndBody)
+            else unsplitForall (init argsAndBody) (snd (last argsAndBody))
+    whitespace = spaces
+    literal str = string str *> whitespace
+    parens :: Parser a -> Parser a
+    parens = between (literal "(") (literal ")")
+    parseVar = parseVar' <* whitespace
+    parseArg = parens $ do
+        x <- parseVar
+        literal ":"
+        t <- recurse
+        return (x, t)
+    withSource p = do
+        start <- getPosition
+        expr <- p
+        end <- getPosition
+        return $ AnnotSource expr $ SourceLoc
+            { sourceFile = sourceName start
+            , sourceStartCol = sourceColumn start
+            , sourceStartLine = sourceLine start
+            , sourceEndCol = sourceColumn end
+            , sourceEndLine = sourceLine end
+            }
