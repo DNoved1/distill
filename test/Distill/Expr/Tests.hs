@@ -43,6 +43,8 @@ arbitraryExpr bound s = sized $ \size -> do
         , [arbitraryType' bound s | True]
         , [arbitraryLambda bound s | not atomic]
         , [arbitraryApply bound s | not atomic]
+        , [arbitraryFold bound s | not atomic]
+        , [arbitraryUnfold bound s | not atomic]
         ]
   where
     arbitraryVar bound s = do
@@ -62,6 +64,22 @@ arbitraryExpr bound s = sized $ \size -> do
         (s, body, t') <- smaller $ arbitraryExpr ((x, t):bound) s
         let m = Lambda x t body
         return (s, Apply m n, subst x n t')
+    arbitraryFold bound s = do
+        (s, x) <- arbitraryUniqueName s
+        (s, m, t) <- smaller $ arbitraryExpr bound s
+        let foldedType = Mu x Star t
+        return (s, Fold m foldedType, foldedType)
+    arbitraryUnfold bound s = do
+        let boundMus = filter (isMu . snd) bound
+        if not (null boundMus)
+            then do
+                (y, Mu x t t') <- elements boundMus
+                return (s, Unfold (Var y), subst x (Mu x t t') t')
+            else do
+                (s, m, Mu x t t') <- arbitraryFold bound s
+                return (s, Unfold m, subst x (Mu x t t') t')
+    isMu Mu{} = True
+    isMu _    = False
 
 -- | Generate an arbitrary well-formed type.
 arbitraryType :: [(UniqueName, Type)] -> Int -> Gen (Int, Type)
@@ -70,6 +88,7 @@ arbitraryType bound s = sized $ \size -> do
     oneof . concat $
         [ [arbitraryStar bound s | atomic]
         , [arbitraryForall bound s | not atomic]
+        , [arbitraryMu bound s | not atomic]
         ]
   where
     arbitraryStar bound s = return (s, Star)
@@ -78,6 +97,10 @@ arbitraryType bound s = sized $ \size -> do
         (s, t) <- smaller $ arbitraryType bound s
         (s, t') <- smaller $ arbitraryType ((x, t):bound) s
         return (s, Forall x t t')
+    arbitraryMu bound s = do
+        (s, x) <- arbitraryUniqueName s
+        (s, t) <- smaller $ arbitraryType ((x, Star):bound) s
+        return (s, Mu x Star t)
 
 -- | Generate an arbitrary set of declarations.
 arbitraryDecls :: [(UniqueName, Type)] -> Int -> Gen (Int, [Decl])

@@ -12,7 +12,7 @@ module Distill.Transform
 import Control.Arrow
 import Control.Monad.Reader
 import Control.Monad.State
-import Data.Functor.Foldable
+import Data.Functor.Foldable hiding (Mu)
 import Data.List ((\\))
 import Data.Maybe (fromJust)
 
@@ -108,4 +108,15 @@ aNormalizeExpr ctor = aNormalizeOuter
             let apply' = unsplitApply args'
             name <- createName
             return (concat lets ++ [(name, apply')], Var name)
+        Mu x t s -> do
+            (tlets, t') <- aNormalizeInner t
+            s' <- aNormalizeOuter s
+            return (tlets, Mu x t' s')
+        Fold m t -> do
+            (mlets, m') <- aNormalizeInner m
+            (tlets, t') <- aNormalizeInner t
+            return (mlets ++ tlets, Fold m' t')
+        Unfold m -> do
+            (mlets, m') <- aNormalizeInner m
+            return (mlets, Unfold m')
     createName = ctor <$> (get <* modify succ)

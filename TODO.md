@@ -2,6 +2,13 @@ Functionality
 =============
 * A 'don't delete' annotation for expressions to mark a computation as side-
   effecting.
+* More sorts of types; of interest are:
+  * ~~Iso-recursive~~
+  * Lazy
+  * Product
+  * Coproduct
+* Add max-depth to normalization so that type-checking doesn't result in the
+  program hanging.
 
 Refactoring
 ===========
@@ -16,3 +23,8 @@ Refactoring
   when parsing and pretty-printing~~; create a similar style for lets/letrecs.
 * It would be good to print out the line(s) in which the error occurs, along
   with a caret (^) and span (~) to make error identification easier.
+
+Testing
+=======
+* More test-cases for 'reasonable' programs.
+* Program coverage via hpc.

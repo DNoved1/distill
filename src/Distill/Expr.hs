@@ -44,7 +44,7 @@ import Control.Arrow hiding ((<+>))
 import Control.Monad.Except
 import Control.Monad.Reader
 import Control.Monad.State
-import Data.Functor.Foldable hiding (Foldable, Unfoldable)
+import Data.Functor.Foldable hiding (Foldable, Unfoldable, Mu)
 import qualified Data.Functor.Foldable as RS
 import Data.List (delete, intersperse, union)
 import Data.Maybe (fromJust)
@@ -64,6 +64,10 @@ data Expr' b
     | Forall b (Type' b) (Type' b)
     | Lambda b (Type' b) (Expr' b)
     | Apply (Expr' b) (Expr' b)
+    -- | Least fixed point types.
+    | Mu b (Type' b) (Type' b)
+    | Fold (Expr' b) (Type' b)
+    | Unfold (Expr' b)
     -- | Source location annotation.
     | AnnotSource (Expr' b) SourceLoc
   deriving (Foldable, Functor, Traversable, Show, Read)
@@ -84,6 +88,9 @@ data Expr'F b a
     | ForallF b a a
     | LambdaF b a a
     | ApplyF a a
+    | MuF b a a
+    | FoldF a a
+    | UnfoldF a
     | AnnotSourceF a SourceLoc
   deriving (Foldable, Functor, Traversable)
 
@@ -97,6 +104,9 @@ instance RS.Foldable (Expr' b) where
         Forall x t s    -> ForallF x t s
         Lambda x t m    -> LambdaF x t m
         Apply m n       -> ApplyF m n
+        Mu x t s        -> MuF x t s
+        Fold m t        -> FoldF m t
+        Unfold m        -> UnfoldF m
         AnnotSource m s -> AnnotSourceF m s
 
 instance RS.Unfoldable (Expr' b) where
@@ -107,6 +117,9 @@ instance RS.Unfoldable (Expr' b) where
         ForallF x t s    -> Forall x t s
         LambdaF x t m    -> Lambda x t m
         ApplyF m n       -> Apply m n
+        MuF x t s        -> Mu x t s
+        FoldF m t        -> Fold m t
+        UnfoldF m        -> Unfold m
         AnnotSourceF m s -> AnnotSource m s
 
 -- | Source location information, mainly used for helpful error messages.
@@ -251,6 +264,23 @@ inferType expr = case expr of
             _ -> throwError "Cannot apply to non-function type."
         checkType n t
         return (subst x t s)
+    Mu x t s -> do
+        assumeIn x t $ checkType s t
+        return t
+    Fold m foldedType -> do
+        Mu x t s <- case foldedType of
+            correct@Mu{} -> return correct
+            incorrect -> throwError "Cannot fold into non-mu type."
+        let unfoldedType = subst x (Mu x t s) s
+        checkType m unfoldedType
+        return foldedType
+    Unfold m -> do
+        foldedType <- inferType m
+        Mu x t s <- case foldedType of
+            correct@Mu{} -> return correct
+            incorrect -> throwError "Cannot unfold non-mu type."
+        let unfoldedType = subst x (Mu x t s) s
+        return unfoldedType
     AnnotSource m _ ->
         inferType m
 
@@ -281,6 +311,14 @@ checkEqual expr1 expr2 = do
             (Apply m n, Apply o p) -> do
                 checkEqual' m o
                 checkEqual' n p
+            (Mu x t s, Mu y r q) -> do
+                checkEqual' t (renameVar y x r)
+                checkEqual' s (renameVar y x q)
+            (Fold m t, Fold n s) -> do
+                checkEqual' m n
+                checkEqual' t s
+            (Unfold m, Unfold n) ->
+                checkEqual' m n
             (_, _) ->
                 throwError "Expressions not equal."
     renameVar x y m
@@ -303,6 +341,10 @@ normalize = cata $ \case
             (ignoringSource -> Lambda x t p) ->
                 normalize =<< subst x <$> n <*> pure p
             m' -> Apply m' <$> n
+    UnfoldF m ->
+        (m >>=) $ \case
+            (ignoringSource -> Fold n t) -> return n
+            m' -> return (Unfold m')
     expr -> embed <$> sequence expr
 
 -- | Determine the set of unbound variables in an expression.
@@ -312,6 +354,7 @@ freeVars = cata $ \case
     LetF x m n    -> m `union` delete x n
     ForallF x t s -> t `union` delete x s
     LambdaF x t m -> t `union` delete x m
+    MuF x t s     -> t `union` delete x s
     expr          -> foldr union [] expr
 
 -- | Renumber the identifiers in an expression such that they are unique. No
@@ -328,6 +371,9 @@ renumber ctor start rebound =
         ForallF x t s    -> abstraction Forall x t s
         LambdaF x t m    -> abstraction Lambda x t m
         ApplyF m n       -> Apply <$> m <*> n
+        MuF x t s        -> abstraction Mu x t s
+        FoldF m t        -> Fold <$> m <*> t
+        UnfoldF m        -> Unfold <$> m
         AnnotSourceF m s -> AnnotSource <$> m <*> pure s
     gensym old = ctor old <$> (get <* modify succ)
     abstraction sort x m n = do
@@ -345,6 +391,7 @@ subst z p = cata $ \case
     LetF x m n    | x == z -> bomb
     ForallF x t s | x == z -> bomb
     LambdaF x t m | x == z -> bomb
+    MuF x t s     | x == z -> bomb
     expr                   -> embed expr
   where
     bomb = error "Substituting through non-unique identifiers."
@@ -374,12 +421,22 @@ pprExpr pprVar = recurse
             let (args, body) = splitLambda lambda
                 args' = map pprLambdaArg args
                 body' = nest 4 (recurse body)
-            in char '\\' <> hsep args' <> char '.' $$ body'
+            in char '\\' <> hsep args' <> fullstop $$ body'
         apply@Apply{} ->
             let args = splitApply apply
                 isAtomic = map isAtomicExpr args
                 args' = map pprApplyArg (zip args isAtomic)
             in hsep args'
+        Mu x t s ->
+            text "mu" <+> pprVar x <+> colon <+> recurse t <> fullstop
+            <+> recurse s
+        Fold m t ->
+            let m' = (parensIf . not . isAtomicExpr) m (recurse m)
+                t' = (parensIf . not . isAtomicExpr) t (recurse t)
+            in text "fold" <+> m' <+> t'
+        Unfold m ->
+            let m' = (parensIf . not . isAtomicExpr) m (recurse m)
+            in text "unfold" <+> m'
     parensIf cond = if cond then parens else id
     pprForallArg ((x, t), dependent, atomic) =
         let wrapper = parensIf (not atomic)
@@ -395,7 +452,7 @@ pprExpr pprVar = recurse
         Var _ -> True
         Star  -> True
         _     -> False
-
+    fullstop = char '.'
 
 -- | Parse an expression. The first argument is the name to give to
 -- non-dependent function types.
@@ -409,9 +466,13 @@ parseExpr defaultName parseVar' = recurse
         -- Uses backtracking because we don't want the variable parser to
         -- pick up reserved words, such as 'let'.
         , try $ do
-            isLet <- optionMaybe (try (string "let"))
-            case isLet of
-                Just _ -> fail "'let' is a reserved word."
+            isReserved <- optionMaybe $ try (string "let")
+                                    <|> try (string "mu")
+                                    <|> try (string "fold")
+                                    <|> try (string "unfold")
+            case isReserved of
+                Just reserved -> fail $ "'" ++ reserved ++ "' is a reserved "
+                                     ++ "word."
                 Nothing -> Var <$> parseVar
         ]
     parseBasic = withSource $ choice
@@ -430,6 +491,23 @@ parseExpr defaultName parseVar' = recurse
             literal "."
             body <- recurse
             return (unsplitLambda args body)
+        , do
+            literal "mu"
+            x <- parseVar
+            literal ":"
+            t <- recurse
+            literal "."
+            s <- recurse
+            return (Mu x t s)
+        , do
+            literal "fold"
+            m <- parseAtomic
+            t <- parseAtomic
+            return (Fold m t)
+        , do
+            literal "unfold"
+            m <- parseAtomic
+            return (Unfold m)
         ]
     parseApplied = withSource $ do
         args <- many1 parseBasic
