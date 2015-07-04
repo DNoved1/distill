@@ -50,13 +50,13 @@ defineExpr name unparsed = do
         xs -> throwError $ "Expression contained unbound variables: " ++ show xs
 
     start <- unique <$> get
-    let expr = renumber UniqueName start [] exprStr
-    let end = nextAvailableUnique expr
+    let (expr, end) = renumber' UniqueName start [] exprStr
     modify (\s -> s {unique = end})
 
     assumed_ <- assumed <$> get
     defined_ <- defined <$> get
-    type_ <- case runTCM (inferType expr) assumed_ defined_ of
+    let tcm = assumesIn assumed_ $ definesIn defined_ $ inferType expr
+    type_ <- case runTCM (uniqueRenamer end) tcm of
         Left err -> throwError err
         Right type_ -> return type_
     uniqueName <- UniqueName name . unique <$> get
