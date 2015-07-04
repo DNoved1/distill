@@ -613,7 +613,8 @@ parseDecl defaultName parseVar' = do
 
 -- | Parse an entire file full of declarations.
 parseFile :: b -> Parser b -> Parser [Decl' b]
-parseFile defaultName parseVar' = many (parseDecl defaultName parseVar') <* eof
+parseFile defaultName parseVar' =
+    parseWhitespace *> many (parseDecl defaultName parseVar') <* eof
 
 -- | "Fix" a variable parser so that it won't pick up reserved words and will
 -- automatically parse whitespace after itself like all the other parsers.

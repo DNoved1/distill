@@ -1,7 +1,52 @@
+#=== Simple Functions =========================================================
 define id
     : (a : *) -> a -> a
     = \(a : *) (x : a). x
 
+define const
+    : (a : *) -> (b : *) -> a -> b -> a
+    = \(a : *) (b : *) (x : a) (y : b). x
+
+#=== Products =================================================================
+define Unit
+    : *
+    = (r : *) -> r -> r
+
+define unit
+    : Unit
+    = id
+
+define Pair
+    : * -> * -> *
+    = \(a : *) (b : *). (r : *) -> (a -> b -> r) -> r
+
+define pair
+    : (a : *) -> (b : *) -> a -> b -> Pair a b
+    = \(a : *) (b : *) (x : a) (y : b) (r : *) (f : a -> b -> r). f x y
+
+define project1
+    : (a : *) -> (b : *) -> Pair a b -> a
+    = \(a : *) (b : *) (p : Pair a b). p a (\(x : a) (y : b). x)
+
+define project2
+    : (a : *) -> (b : *) -> Pair a b -> b
+    = \(a : *) (b : *) (p : Pair a b). p b (\(x : a) (y : b). y)
+
+#=== Existentials =============================================================
+define Exists
+    : (a : *) -> (a -> *) -> *
+    = \(a : *) (b : a -> *). (r : *) -> ((x : a) -> b x -> r) -> r
+
+define exists
+    : (a : *) -> (b : a -> *) -> (x : a) -> b x -> Exists a b
+    = \(a : *) (b : a -> *) (x : a) (y : b x) (r : *) (f : (x : a) -> b x -> r).
+        f x y
+
+define eproject1
+    : (a : *) -> (b : a -> *) -> Exists a b -> a
+    = \(a : *) (b : a -> *) (e : Exists a b). e a (\(x : a) (y : b x). x)
+
+#=== Natural Numbers ==========================================================
 define Nat
     : *
     = mu self:*. (r : *) -> r -> (self -> r) -> r
@@ -17,3 +62,32 @@ define succ
 define add
     : Nat -> Nat -> Nat
     = \(n : Nat) (m : Nat). (unfold m) Nat n (\(p : Nat). succ (add n p))
+
+#=== Lists ====================================================================
+define List
+    : * -> *
+    = \(a : *). mu X:*. (r : *) -> r -> (a -> X -> r) -> r
+
+define nil
+    : (a : *) -> List a
+    = \(a : *). fold (\(r : *) (nil : r) (cons : a -> List a -> r). nil) (List a)
+
+define cons
+    : (a : *) -> a -> List a -> List a
+    = \(a : *) (head : a) (tail : List a). fold
+        (\(r : *) (nil : r) (cons : a -> List a -> r). cons head tail)
+        (List a)
+
+define append
+    : (a : *) -> List a -> List a -> List a
+    = \(a : *) (xs : List a) (ys : List a). (unfold xs)
+        (List a)
+        ys
+        (\(x : a) (xs : List a). cons a x (append a xs ys))
+
+define map
+    : (a : *) -> (b : *) -> (a -> b) -> List a -> List b
+    = \(a : *) (b : *) (f : a -> b) (xs : List a). (unfold xs)
+        (List b)
+        (nil b)
+        (\(x : a) (xs : List a). cons b (f x) (map a b f xs))
