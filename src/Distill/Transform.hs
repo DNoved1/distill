@@ -17,16 +17,17 @@ import Data.List ((\\))
 import Data.Maybe (fromJust)
 
 import Distill.Expr
+import Distill.Util
 
 -- | Lambda-lift a set of declarations into supercombinator form.
-lambdaLift :: Eq b => (b -> Int -> b) -> Int -> [Decl' b] -> [Decl' b]
+lambdaLift :: (Eq b, Pretty b) => (b -> Int -> b) -> Int -> [Decl' b] -> [Decl' b]
 lambdaLift ctor start decls =
     let declTypes = map (\(Decl' x t _) -> (x, t)) decls
         state = mapM_ (lambdaLift' ctor declTypes) decls in
     snd $ snd $ runState state (start, [])
 
 -- | Lambda-lifts a single declaration into supercombinator form.
-lambdaLift' :: Eq b => (b -> Int -> b) -> [(b, Type' b)] -> Decl' b
+lambdaLift' :: (Eq b, Pretty b) => (b -> Int -> b) -> [(b, Type' b)] -> Decl' b
             -> State (Int, [Decl' b]) ()
 lambdaLift' ctor assumed (Decl' x t m) = do
     m' <- runReaderT (lambdaLiftOuter m) (x, assumed)
@@ -72,7 +73,8 @@ lambdaLift' ctor assumed (Decl' x t m) = do
         decls <- snd <$> get
         let assumed' = assumed ++ map (\(Decl' x t _) -> (x, t)) decls
         let defined' = map (\(Decl' x _ m) -> (x, m)) decls
-        return (fromRight (runTCM (inferType expr) assumed' defined'))
+        let tcm = assumesIn assumed' $ definesIn defined' $ inferType expr
+        return (fromRight (runTCM undefined tcm))
     -- Extract a value from an either, assuming it is correct.
     fromRight = \case
         Right b -> b

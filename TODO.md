@@ -23,6 +23,8 @@ Refactoring
   when parsing and pretty-printing~~; create a similar style for lets/letrecs.
 * It would be good to print out the line(s) in which the error occurs, along
   with a caret (^) and span (~) to make error identification easier.
+* Specialize pretty-printing expressions so that unique names are rendered
+  without the number if no ambiguity would arise.
 
 Testing
 =======

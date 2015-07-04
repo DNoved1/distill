@@ -75,13 +75,16 @@ prop_lambdaLiftingCreatesSuperCombinators (Decls (decls, nextUnique)) =
 -- typeability or type of an expression.
 prop_aNormalizationPreservesTypes :: WellTypedExpr -> Result
 prop_aNormalizationPreservesTypes (WellTypedExpr expr) =
-    let type1 = fromRight (runTCM (inferType expr) [] [])
-        start = nextAvailableUnique expr
-        expr' = evalState (aNormalizeExpr (UniqueName "ANF") expr) start
-        maybeType2 = runTCM (inferType expr) [] []
-    in
-    case maybeType2 of
-        Right type2 -> case runTCM (checkEqual type1 type2) [] [] of
+    let unique = nextAvailableUnique expr
+        type1 = fromRight (runTCM (uniqueRenamer unique) (inferType expr))
+        expr' = evalState (aNormalizeExpr (UniqueName "ANF") expr) unique
+        unique2 = nextAvailableUnique expr'
+        maybeType2 = runTCM (uniqueRenamer unique2) (inferType expr')
+    in case maybeType2 of
+        Right type2 ->
+          let unique3 = max (nextAvailableUnique type1)
+                            (nextAvailableUnique type2)
+          in case runTCM (uniqueRenamer unique3) (checkEqual type1 type2) of
             Right () -> succeeded
             Left err -> failed
                 { reason = "Failed to check that the type of an expression "

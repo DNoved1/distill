@@ -32,9 +32,9 @@ quickCheckToHUnit qcTest = TestCase $
 smaller :: Gen a -> Gen a
 smaller = scale (`div` 2)
 
--- | Parse the entirety of a file as an sexpr.
-parseExprFile :: Parser (Expr' String)
-parseExprFile = parseExpr "%No-Name%" parseVar <* eof
+-- | Specialization of Expr.parseFile to strings.
+parseExprFile :: Parser [Decl' String]
+parseExprFile = parseFile "%No-Name%" parseVar
   where
     parseVar = many1 (satisfy isAlphaNum)
 

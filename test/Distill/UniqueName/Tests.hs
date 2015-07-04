@@ -12,4 +12,8 @@ arbitraryUniqueName :: Int -> Gen (Int, UniqueName)
 arbitraryUniqueName s = do
     len <- choose (1,3)
     name <- replicateM len (elements (['a'..'z'] ++ ['A'..'Z']))
-    return (succ s, UniqueName name s)
+    if name `elem` reservedWords
+        then arbitraryUniqueName s
+        else return (succ s, UniqueName name s)
+  where
+    reservedWords = ["let", "mu", "fold", "unfold", "define"]

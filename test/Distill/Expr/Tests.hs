@@ -18,6 +18,7 @@ import Distill.Expr
 import Distill.TestUtil
 import Distill.UniqueName
 import Distill.UniqueName.Tests
+import Distill.Util
 
 tests :: Test
 tests = TestLabel "Distill.Expr.Tests" $ TestList
@@ -63,7 +64,7 @@ arbitraryExpr bound s = sized $ \size -> do
         (s, n, t) <- smaller $ arbitraryExpr bound s
         (s, body, t') <- smaller $ arbitraryExpr ((x, t):bound) s
         let m = Lambda x t body
-        return (s, Apply m n, subst x n t')
+        return (s, Apply m n, subst' x n t')
     arbitraryFold bound s = do
         (s, x) <- arbitraryUniqueName s
         (s, m, t) <- smaller $ arbitraryExpr bound s
@@ -74,12 +75,13 @@ arbitraryExpr bound s = sized $ \size -> do
         if not (null boundMus)
             then do
                 (y, Mu x t t') <- elements boundMus
-                return (s, Unfold (Var y), subst x (Mu x t t') t')
+                return (s, Unfold (Var y), subst' x (Mu x t t') t')
             else do
                 (s, m, Mu x t t') <- arbitraryFold bound s
-                return (s, Unfold m, subst x (Mu x t t') t')
+                return (s, Unfold m, subst' x (Mu x t t') t')
     isMu Mu{} = True
     isMu _    = False
+    subst' x m n = fromRight $ runTCM undefined $ subst x m n
 
 -- | Generate an arbitrary well-formed type.
 arbitraryType :: [(UniqueName, Type)] -> Int -> Gen (Int, Type)
@@ -117,21 +119,28 @@ arbitraryDecls bound s = sized (arbitraryDecls' bound s)
 -- | The property that generated expressions are well-typed.
 prop_exprsWellTyped :: WellTypedExpr -> Result
 prop_exprsWellTyped (WellTypedExpr expr) =
-    case runTCM (inferType expr) [] [] of
+    let unique = nextAvailableUnique expr in
+    case runTCM (uniqueRenamer unique) (inferType expr) of
         Right _  -> succeeded
         Left err -> failed {reason = err}
 
--- | A simple test on parsing and type-checking a file.
+-- | A simple test on parsing and type-checking a file of declarations.
 simpleTest :: Test
 simpleTest = TestCase $ do
     let fileName = "./test/simple.distill"
     withFile fileName ReadMode $ \file -> do
         contents <- hGetContents file
         let parsed = parse parseExprFile fileName contents
-        expr <- case parsed of
+        decls <- case parsed of
             Left err -> assertFalse (show err)
-            Right expr -> return expr
-        case runTCM (inferType expr) [] [] of
+            Right decls -> return decls
+        let decls' = renumberDecls UniqueName decls
+        let assumes = map (\(Decl' x t _) -> (x, t)) decls'
+        let defines = map (\(Decl' x _ m) -> (x, m)) decls'
+        let tcm = flip mapM_ decls' $ \(Decl' x t m) -> checkType m t
+        let unique = maximum (map nextAvailableUniqueDecl decls')
+        let renamer = uniqueRenamer unique
+        case runTCM renamer $ assumesIn assumes $ definesIn defines $ tcm of
             Left err -> assertFalse err
             Right _ -> return ()
 
@@ -148,8 +157,10 @@ prop_parsePprInverses (WellTypedExpr expr) =
                     ++ show err
             }
         Right expr' ->
-            let renumbered = renumber UniqueName 0 [] expr'
-            in case runTCM (checkEqual expr renumbered) [] [] of
+            let renumbered = renumber UniqueName expr'
+                unique = nextAvailableUnique renumbered
+                renamer = uniqueRenamer unique
+            in case runTCM renamer (checkEqual expr renumbered) of
                     Left err -> failed
                         { reason = "Failed to check original expression was "
                                 ++ "equal to pretty-printed and parsed "

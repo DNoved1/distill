@@ -1,6 +1,7 @@
 {-# LANGUAGE DeriveFoldable #-}
 {-# LANGUAGE DeriveFunctor #-}
 {-# LANGUAGE DeriveTraversable #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE ViewPatterns #-}
@@ -26,18 +27,28 @@ module Distill.Expr
     , ignoringSource
     , deleteSourceAnnotations
     -- * Type checking
+    , Renamer
     , TCM
     , runTCM
+    , assumeIn
+    , assumesIn
+    , defineIn
+    , definesIn
     , checkType
     , inferType
     , checkEqual
     , normalize
     , freeVars
     , renumber
+    , renumber'
+    , renumberDecls
     , subst
     -- * Pretty-printing and Parsing
     , pprExpr
+    , pprDecl
     , parseExpr
+    , parseDecl
+    , parseFile
     ) where
 
 import Control.Arrow hiding ((<+>))
@@ -51,6 +62,8 @@ import Data.Maybe (fromJust)
 import Text.Parsec hiding (char)
 import Text.Parsec.String
 import Text.PrettyPrint
+
+import Distill.Util
 
 -- | Dependently-typed lambda calculus expressions ranging over b, the type of
 -- binders.
@@ -76,9 +89,15 @@ data Expr' b
 -- used for clarity's sake.
 type Type' = Expr'
 
+instance (Eq b, Pretty b) => Pretty (Expr' b) where
+    ppr = pprExpr ppr
+
 -- | A top-level declaration in a file.
 data Decl' b = Decl' b (Type' b) (Expr' b)
   deriving (Show, Read)
+
+instance (Eq b, Pretty b) => Pretty (Decl' b) where
+    ppr = pprDecl ppr
 
 -- | Functor view of expressions.
 data Expr'F b a
@@ -164,8 +183,8 @@ unsplitLambda args body = foldr ($) body (map (uncurry Lambda) args)
 
 -- | Utility to split an application into a list of expressions.
 splitApply :: Expr' b -> [Expr' b]
-splitApply = reverse . \case
-    Apply m n -> n : splitApply m
+splitApply = \case
+    Apply m n -> splitApply m ++ [n]
     m         -> [m]
 
 -- | Utility to convert a list of expressions into an application.
@@ -185,18 +204,28 @@ deleteSourceAnnotations = cata $ \case
     AnnotSourceF m _ -> m
     m                -> embed m
 
--- | The monad used for type checking. Includes:
---
---     * Either String - For error messages.
---     * Reader [(b, Type' b)] - For assumed types, introduced through lambda
---           abstraction.
---     * Reader [(b, Expr' b)] - For definitions, introduced through let
---           bindings or at global scope.
-type TCM b a = ReaderT ([(b, Type' b)], [(b, Expr' b)]) (Either String) a
+-- | The monad used for type checking.
+newtype TCM b a = TCM { unTCM ::
+                 ReaderT ([(b, Type' b)], [(b, Expr' b)])
+                   (StateT (Renamer b)
+                     (Either String))
+                 a
+    } deriving ( Applicative, Functor, Monad
+               , MonadReader ([(b, Type' b)], [(b, Expr' b)])
+               , MonadState (Renamer b)
+               , MonadError String
+               )
+
+-- | The type of variable renaming functions. Each function will only be used
+-- once and the list should be infinite.
+type Renamer b = [b -> b]
 
 -- | Run the type checking monad.
-runTCM :: TCM b a -> [(b, Type' b)] -> [(b, Expr' b)] -> Either String a
-runTCM tcm assume defs = runReaderT tcm (assume, defs)
+runTCM :: Renamer b -> TCM b a -> Either String a
+runTCM renamer tcm =
+    flip evalStateT renamer $
+    flip runReaderT ([], []) $
+    unTCM tcm
 
 -- | Assume a variable is a given type while type checking a certain piece of
 -- code. This is useful for introducing abstractions such as in lambdas and
@@ -228,25 +257,19 @@ getDefinitions = snd <$> ask
 
 -- | Check that an expression has a certain type. If the expression is not the
 -- given type an error will be generated
-checkType :: Eq b => Expr' b -> Type' b -> TCM b ()
-checkType expr type_ = case expr of
-    AnnotSource m s ->
-        checkType m type_
-    _ -> do
-        type_' <- inferType expr
-        checkEqual type_ type_'
+checkType :: (Pretty b, Eq b) => Expr' b -> Type' b -> TCM b ()
+checkType expr type_ = checkEqual type_ =<< inferType expr
 
 -- | Infer the type of an expression, if possible. If a type cannot be
 -- inferred an error will be generated.
-inferType :: Eq b => Expr' b -> TCM b (Type' b)
+inferType :: (Pretty b, Eq b) => Expr' b -> TCM b (Type' b)
 inferType expr = case expr of
     Var x -> do
         assumed <- getAssumptions
         case lookup x assumed of
             Just t -> return t
-            Nothing -> throwError "Unbound variable."
-    Star ->
-        return Star
+            Nothing -> throwError $ "Unbound variable '" ++ prettyShow x ++ "'."
+    Star -> return Star
     Let x m n -> do
         t <- inferType m
         assumeIn x t $ defineIn x m $ inferType n
@@ -259,40 +282,45 @@ inferType expr = case expr of
         s <- assumeIn x t $ inferType m
         return (Forall x t s)
     Apply m n -> do
-        Forall x t s <- inferType m >>= \case
+        Forall x t s <- inferType m >>= normalize >>= \case
             correct@Forall{} -> return correct
-            _ -> throwError "Cannot apply to non-function type."
+            incorrect -> throwError $
+                "Cannot apply to non-function type '" ++ prettyShow incorrect
+                ++ "'."
         checkType n t
-        return (subst x t s)
+        subst x n s
     Mu x t s -> do
         assumeIn x t $ checkType s t
         return t
     Fold m foldedType -> do
-        Mu x t s <- case foldedType of
+        Mu x t s <- normalize foldedType >>= \case
             correct@Mu{} -> return correct
-            incorrect -> throwError "Cannot fold into non-mu type."
-        let unfoldedType = subst x (Mu x t s) s
+            incorrect -> throwError $
+                "Cannot fold into non-mu type '" ++ prettyShow incorrect ++ "'."
+        unfoldedType <- subst x (Mu x t s) s
         checkType m unfoldedType
         return foldedType
     Unfold m -> do
-        foldedType <- inferType m
-        Mu x t s <- case foldedType of
+        Mu x t s <- inferType m >>= normalize >>= \case
             correct@Mu{} -> return correct
-            incorrect -> throwError "Cannot unfold non-mu type."
-        let unfoldedType = subst x (Mu x t s) s
-        return unfoldedType
-    AnnotSource m _ ->
-        inferType m
+            incorrect -> throwError $
+                "Cannot unfold non-mu type '" ++ prettyShow incorrect ++ "'."
+        subst x (Mu x t s) s
+    AnnotSource m s ->
+        catchError
+            (inferType m)
+            (\err -> throwError $ err ++ "\n\t At [" ++ show (sourceStartLine s)
+                ++ ":" ++ show (sourceStartCol s) ++ "]")
 
 -- | Check that two expressions are equal up to beta reduction. If they are
 -- not, an error will be generated.
-checkEqual :: Eq b => Expr' b -> Expr' b -> TCM b ()
+checkEqual :: (Eq b, Pretty b) => Expr' b -> Expr' b -> TCM b ()
 checkEqual expr1 expr2 = do
     expr1' <- normalize expr1
     expr2' <- normalize expr2
     checkEqual' expr1' expr2'
   where
-    checkEqual' :: Eq b => Expr' b -> Expr' b -> TCM b ()
+    checkEqual' :: (Eq b, Pretty b) => Expr' b -> Expr' b -> TCM b ()
     checkEqual' expr1 expr2 =
         case (ignoringSource expr1, ignoringSource expr2) of
             (Var x, Var y) | x == y ->
@@ -301,50 +329,57 @@ checkEqual expr1 expr2 = do
                 return ()
             (Let x m n, Let y o p) -> do
                 checkEqual' m o
-                checkEqual' n (renameVar y x p)
+                checkEqual' n =<< renameVar y x p
             (Forall x t s, Forall y r q) -> do
-                checkEqual' t (renameVar y x r)
-                checkEqual' s (renameVar y x q)
+                checkEqual' t =<< renameVar y x r
+                checkEqual' s =<< renameVar y x q
             (Lambda x t m, Lambda y s n) -> do
                 checkEqual' t s
-                checkEqual' m (renameVar y x n)
+                checkEqual' m =<< renameVar y x n
             (Apply m n, Apply o p) -> do
                 checkEqual' m o
                 checkEqual' n p
             (Mu x t s, Mu y r q) -> do
-                checkEqual' t (renameVar y x r)
-                checkEqual' s (renameVar y x q)
+                checkEqual' t =<< renameVar y x r
+                checkEqual' s =<< renameVar y x q
             (Fold m t, Fold n s) -> do
                 checkEqual' m n
                 checkEqual' t s
             (Unfold m, Unfold n) ->
                 checkEqual' m n
-            (_, _) ->
-                throwError "Expressions not equal."
+            (m, n) -> throwError $ render $
+                text "Cannot make the following two types equal:" $$
+                nest 4 (ppr m) $$
+                nest 4 (ppr n)
     renameVar x y m
-        | x == y    = m
+        | x == y    = return m
         | otherwise = subst x (Var y) m
 
 -- | Reduce an expression up to normal form. May generate an error if
 -- erroneous reductions would occur, such as applying an argument to a
 -- non-function type.
-normalize :: Eq b => Expr' b -> TCM b (Expr' b)
+normalize :: (Eq b, Pretty b) => Expr' b -> TCM b (Expr' b)
 normalize = cata $ \case
     VarF x -> do
         definitions <- getDefinitions
         case lookup x definitions of
             Just m  -> normalize m
             Nothing -> return (Var x)
-    LetF x m n -> normalize =<< subst x <$> m <*> n
+    LetF x m n -> do
+        m' <- m
+        n' <- n
+        normalize =<< subst x m' n'
     ApplyF m n ->
         (m >>=) $ \case
-            (ignoringSource -> Lambda x t p) ->
-                normalize =<< subst x <$> n <*> pure p
+            (ignoringSource -> Lambda x t p) -> do
+                n' <- n
+                normalize =<< subst x n' p
             m' -> Apply m' <$> n
     UnfoldF m ->
         (m >>=) $ \case
             (ignoringSource -> Fold n t) -> return n
             m' -> return (Unfold m')
+    AnnotSourceF m _ -> m
     expr -> embed <$> sequence expr
 
 -- | Determine the set of unbound variables in an expression.
@@ -360,9 +395,16 @@ freeVars = cata $ \case
 -- | Renumber the identifiers in an expression such that they are unique. No
 -- free variables should exist in the expression - if they do an exception may
 -- be thrown.
-renumber :: Eq b => (b -> Int -> b') -> Int -> [(b, b')] -> Expr' b -> Expr' b'
-renumber ctor start rebound =
-    flip evalState start . flip runReaderT rebound . cata phi
+renumber :: Eq b => (b -> Int -> b') -> Expr' b -> Expr' b'
+renumber ctor expr = fst (renumber' ctor 0 [] expr)
+
+-- | 'renumber', but with the ability to specify a starting index for renaming
+-- and a set of already renumbered names. Also returns the next available index
+-- for renumbering; this is useful for subsequent calls.
+renumber' :: Eq b => (b -> Int -> b') -> Int -> [(b, b')] -> Expr' b
+         -> (Expr' b', Int)
+renumber' ctor start rebound =
+    flip runState start . flip runReaderT rebound . cata phi
   where
     phi = \case
         VarF x           -> Var . fromJust . lookup x <$> ask
@@ -380,21 +422,42 @@ renumber ctor start rebound =
         x' <- gensym x
         sort x' <$> m <*> local ((x,x'):) n
 
+-- | Renumber a set of potentially mutually recursive declarations. This will
+-- preserve names at the top level.
+renumberDecls :: Eq b => (b -> Int -> b') -> [Decl' b] -> [Decl' b']
+renumberDecls ctor decls = evalState (mapM renumberDecl decls) (0, [])
+  where
+    renumberDecl (Decl' x t m) = do
+        x' <- ctor x . fst <$> get
+        modify (succ *** ((x,x'):))
+        t' <- wrappedRenumber t
+        m' <- wrappedRenumber m
+        return (Decl' x' t' m')
+    wrappedRenumber m = do
+        (oldState, rebound) <- get
+        let (result, newState) = renumber' ctor oldState rebound m
+        modify (first (const newState))
+        return result
+
 -- | Substitute an identifier for an expression in another expression. In other
 -- words, @subst x m n@ corresponds to n[x := m].
---
--- It is expected that identifiers will have been made unique prior to
--- executing this function - if not an exception may be thrown.
-subst :: Eq b => b -> Expr' b -> Expr' b -> Expr' b
-subst z p = cata $ \case
-    VarF x        | x == z -> p
-    LetF x m n    | x == z -> bomb
-    ForallF x t s | x == z -> bomb
-    LambdaF x t m | x == z -> bomb
-    MuF x t s     | x == z -> bomb
-    expr                   -> embed expr
+subst :: (Eq b, Pretty b) => b -> Expr' b -> Expr' b -> TCM b (Expr' b)
+subst z p = para $ \case
+    VarF    x     | x == z -> return p
+    LetF    x m n | x == z -> abstraction Let    x (fst m) (fst n)
+    ForallF x t s | x == z -> abstraction Forall x (fst t) (fst s)
+    LambdaF x t m | x == z -> abstraction Lambda x (fst t) (fst m)
+    MuF     x t s | x == z -> abstraction Mu     x (fst t) (fst s)
+    expr                   -> embed <$> (sequence (snd <$> expr))
   where
-    bomb = error "Substituting through non-unique identifiers."
+    bomb = error $ "Substituting through non-unique identifiers ("
+                ++ prettyShow z ++ ")."
+    abstraction sort x m n = do
+        rename <- head <$> (get <* modify tail)
+        let x' = rename x
+        m' <- subst x (Var x') m
+        n' <- subst x (Var x') n
+        subst z p (sort x' m' n')
 
 -- | Pretty print an expression.
 pprExpr :: Eq b => (b -> Doc) -> Expr' b -> Doc
@@ -439,7 +502,7 @@ pprExpr pprVar = recurse
             in text "unfold" <+> m'
     parensIf cond = if cond then parens else id
     pprForallArg ((x, t), dependent, atomic) =
-        let wrapper = parensIf (not atomic)
+        let wrapper = parensIf (not atomic || dependent)
             body = if dependent
                 then pprVar x <+> colon <+> recurse t
                 else recurse t
@@ -448,11 +511,18 @@ pprExpr pprVar = recurse
     pprApplyArg (m, atomic) =
         let wrapper = parensIf (not atomic)
         in wrapper (recurse m)
-    isAtomicExpr = \case
+    isAtomicExpr = ignoringSource >>> \case
         Var _ -> True
         Star  -> True
         _     -> False
     fullstop = char '.'
+
+-- | Pretty-print a declaration.
+pprDecl :: Eq b => (b -> Doc) -> Decl' b -> Doc
+pprDecl pprVar (Decl' x t m) =
+    text "define" <+> pprVar x $$
+    nest 4 (colon <+> pprExpr pprVar t) $$
+    nest 4 (equals <+> pprExpr pprVar m)
 
 -- | Parse an expression. The first argument is the name to give to
 -- non-dependent function types.
@@ -461,19 +531,9 @@ parseExpr defaultName parseVar' = recurse
   where
     recurse = parseArrowed
     parseAtomic = withSource $ choice
-        [ parens recurse
+        [ parseParens recurse
         , pure Star <* literal "*"
-        -- Uses backtracking because we don't want the variable parser to
-        -- pick up reserved words, such as 'let'.
-        , try $ do
-            isReserved <- optionMaybe $ try (string "let")
-                                    <|> try (string "mu")
-                                    <|> try (string "fold")
-                                    <|> try (string "unfold")
-            case isReserved of
-                Just reserved -> fail $ "'" ++ reserved ++ "' is a reserved "
-                                     ++ "word."
-                Nothing -> Var <$> parseVar
+        , Var <$> parseVar
         ]
     parseBasic = withSource $ choice
         [ parseAtomic
@@ -521,12 +581,9 @@ parseExpr defaultName parseVar' = recurse
         return $ if null (tail argsAndBody)
             then snd (head argsAndBody)
             else unsplitForall (init argsAndBody) (snd (last argsAndBody))
-    whitespace = spaces
-    literal str = string str *> whitespace
-    parens :: Parser a -> Parser a
-    parens = between (literal "(") (literal ")")
-    parseVar = parseVar' <* whitespace
-    parseArg = parens $ do
+    literal = parseLiteral
+    parseVar = fixParseVar parseVar'
+    parseArg = parseParens $ do
         x <- parseVar
         literal ":"
         t <- recurse
@@ -542,3 +599,44 @@ parseExpr defaultName parseVar' = recurse
             , sourceEndCol = sourceColumn end
             , sourceEndLine = sourceLine end
             }
+
+-- | Parse a declaration.
+parseDecl :: b -> Parser b -> Parser (Decl' b)
+parseDecl defaultName parseVar' = do
+    parseLiteral "define"
+    x <- fixParseVar parseVar'
+    parseLiteral ":"
+    t <- parseExpr defaultName parseVar'
+    parseLiteral "="
+    m <- parseExpr defaultName parseVar'
+    return (Decl' x t m)
+
+-- | Parse an entire file full of declarations.
+parseFile :: b -> Parser b -> Parser [Decl' b]
+parseFile defaultName parseVar' = many (parseDecl defaultName parseVar') <* eof
+
+-- | "Fix" a variable parser so that it won't pick up reserved words and will
+-- automatically parse whitespace after itself like all the other parsers.
+fixParseVar :: Parser b -> Parser b
+fixParseVar parseVar' = try $ do
+    -- Uses backtracking because we don't want the variable parser to
+    -- pick up reserved words, such as 'let'.
+    isReserved <- optionMaybe $ try (string "let")
+                            <|> try (string "mu")
+                            <|> try (string "fold")
+                            <|> try (string "unfold")
+                            <|> try (string "define")
+    case isReserved of
+        Just reserved -> fail $ "'" ++ reserved ++ "' is a reserved word."
+        Nothing -> parseVar' <* parseWhitespace
+
+parseLiteral :: String -> Parser String
+parseLiteral str = string str <* parseWhitespace
+
+parseWhitespace :: Parser ()
+parseWhitespace = void (many (void (oneOf " \t\n") <|> parseComment))
+  where
+    parseComment = void (string "#" >> many (noneOf "\n") >> string "\n")
+
+parseParens :: Parser a -> Parser a
+parseParens = between (parseLiteral "(") (parseLiteral ")")

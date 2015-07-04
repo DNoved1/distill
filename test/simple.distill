@@ -1,1 +1,19 @@
-\(a : *) (x : a). x
+define id
+    : (a : *) -> a -> a
+    = \(a : *) (x : a). x
+
+define Nat
+    : *
+    = mu self:*. (r : *) -> r -> (self -> r) -> r
+
+define zero
+    : Nat
+    = fold (\(r : *) (zero : r) (succ : Nat -> r). zero) Nat
+
+define succ
+    : Nat -> Nat
+    = \(n : Nat). fold (\(r : *) (zero : r) (succ : Nat -> r). succ n) Nat
+
+define add
+    : Nat -> Nat -> Nat
+    = \(n : Nat) (m : Nat). (unfold m) Nat n (\(p : Nat). succ (add n p))
