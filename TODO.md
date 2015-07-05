@@ -5,10 +5,11 @@ Functionality
 * More sorts of types; of interest are:
   * ~~Iso-recursive~~
   * Lazy
-  * Product
-  * Coproduct
+  * ~~Product~~
+  * ~~Coproduct~~
 * Add max-depth to normalization so that type-checking doesn't result in the
   program hanging.
+* Special case analysis for empty type (principle of explosion).
 
 Refactoring
 ===========
@@ -25,6 +26,12 @@ Refactoring
   with a caret (^) and span (~) to make error identification easier.
 * Specialize pretty-printing expressions so that unique names are rendered
   without the number if no ambiguity would arise.
+* Normalize to weak-head normal form for better error messages.
+* Fix parser so that names starting with reserved words are allowed.
+* Better type-checking error type (aka, not a string).
+* inferType / checkType should return the elaborated term (without unknown
+  type annotations).
+* Split Expr.hs into multiple sub-packages.
 
 Testing
 =======

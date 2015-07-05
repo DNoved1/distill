@@ -9,13 +9,13 @@ import Data.List ((\\))
 import Test.HUnit
 import Test.QuickCheck hiding (Result, reason)
 import Test.QuickCheck.Property
-import Text.PrettyPrint
 
 import Distill.Expr
 import Distill.Expr.Tests hiding (tests)
 import Distill.TestUtil
 import Distill.Transform
 import Distill.UniqueName
+import Distill.Util
 
 tests :: Test
 tests = TestLabel "Distill.Transform.Tests" $ TestList
@@ -60,16 +60,14 @@ prop_lambdaLiftingCreatesSuperCombinators (Decls (decls, nextUnique)) =
         nonSupers -> failed
             { reason = "Failed to lambda lift fully.\n"
                     ++ "\tThe declarations:\n"
-                    ++ unlines (map showDecl decls)
+                    ++ unlines (map prettyShow decls)
                     ++ "\tWere lambda lifted into the following:\n"
-                    ++ unlines (map showDecl decls')
+                    ++ unlines (map prettyShow decls')
                     ++ "\tThe following declarations are not supercombinators:\n"
-                    ++ unlines (map (render . pprUnique) nonSupers)
+                    ++ unlines (map prettyShow nonSupers)
             }
   where
     combine acc (name, isSuper) = if isSuper then acc else name:acc
-    showDecl (Decl' x t m) =
-        render $ text "define" <+> pprUnique x <+> pprExpr pprUnique m
 
 -- | The property that A-Normalization of expressions should not change the
 -- typeability or type of an expression.
@@ -103,16 +101,13 @@ prop_aNormalizationPreservesTypes (WellTypedExpr expr) =
                     ++ err
             }
   where
-    fromRight (Right b) = b
-    fromRight (Left  _) = error "'fromRight'"
     showExprBeforeAndAfter before after =
            "\tStarted with the expression:\n"
-        ++ showExpr before ++ "\n"
+        ++ prettyShow before ++ "\n"
         ++ "\tAfter A-Normalization, the expression became:\n"
-        ++ showExpr after ++ "\n"
+        ++ prettyShow after ++ "\n"
     showTypeBeforeAndAfter before after =
            "\tThe expression originally had the type:\n"
-        ++ showExpr before ++ "\n"
+        ++ prettyShow before ++ "\n"
         ++ "\tAfter A-Normalization, the expression had type:\n"
-        ++ showExpr after ++ "\n"
-    showExpr = render . pprExpr pprUnique
+        ++ prettyShow after ++ "\n"

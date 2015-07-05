@@ -75,10 +75,6 @@ lambdaLift' ctor assumed (Decl' x t m) = do
         let defined' = map (\(Decl' x _ m) -> (x, m)) decls
         let tcm = assumesIn assumed' $ definesIn defined' $ inferType expr
         return (fromRight (runTCM undefined tcm))
-    -- Extract a value from an either, assuming it is correct.
-    fromRight = \case
-        Right b -> b
-        Left  _ -> error "'fromRight'"
 
 -- | Translate an expression into administrative normal form.
 aNormalizeExpr :: (Int -> b) -> Expr' b -> State Int (Expr' b)
@@ -121,4 +117,35 @@ aNormalizeExpr ctor = aNormalizeOuter
         Unfold m -> do
             (mlets, m') <- aNormalizeInner m
             return (mlets, Unfold m')
+        UnitT -> return ([], UnitT)
+        UnitV -> return ([], UnitV)
+        Product x t s -> do
+            (tlets, t') <- aNormalizeInner t
+            s' <- aNormalizeOuter s
+            return (tlets, Product x t' s')
+        Pack x m n s -> do
+            (mlets, m') <- aNormalizeInner m
+            (nlets, n') <- aNormalizeInner n
+            s' <- aNormalizeOuter s
+            return (mlets ++ nlets, Pack x m' n' s')
+        Unpack m x y n -> do
+            (mlets, m') <- aNormalizeInner m
+            n' <- aNormalizeOuter n
+            return (mlets, Unpack m' x y n')
+        Coproduct ts -> do
+            (tslets, ts') <- unzip <$> mapM aNormalizeInner ts
+            return (concat tslets, Coproduct ts')
+        Inject m i t -> do
+            (mlets, m') <- aNormalizeInner m
+            (tlets, t') <- aNormalizeInner t
+            return (mlets ++ tlets, Inject m' i t')
+        CaseOf m cs -> do
+            (mlets, m') <- aNormalizeInner m
+            cs' <- forM cs $ \(x, c) -> do
+                c' <- aNormalizeOuter c
+                return (x, c')
+            return (mlets, CaseOf m' cs')
+        AnnotSource{} -> unstrippedError
+        UnknownType{} -> unstrippedError
     createName = ctor <$> (get <* modify succ)
+    unstrippedError = error "Unstripped annotations while A-normalizing."

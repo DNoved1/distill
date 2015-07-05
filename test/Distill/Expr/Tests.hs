@@ -12,7 +12,6 @@ import Test.QuickCheck (Arbitrary(..))
 import Test.QuickCheck.Gen
 import Test.QuickCheck.Property
 import Text.Parsec
-import Text.PrettyPrint hiding (char)
 
 import Distill.Expr
 import Distill.TestUtil
@@ -93,7 +92,7 @@ arbitraryType bound s = sized $ \size -> do
         , [arbitraryMu bound s | not atomic]
         ]
   where
-    arbitraryStar bound s = return (s, Star)
+    arbitraryStar _ s = return (s, Star)
     arbitraryForall bound s = do
         (s, x) <- arbitraryUniqueName s
         (s, t) <- smaller $ arbitraryType bound s
@@ -137,7 +136,7 @@ simpleTest = TestCase $ do
         let decls' = renumberDecls UniqueName decls
         let assumes = map (\(Decl' x t _) -> (x, t)) decls'
         let defines = map (\(Decl' x _ m) -> (x, m)) decls'
-        let tcm = flip mapM_ decls' $ \(Decl' x t m) -> checkType m t
+        let tcm = flip mapM_ decls' $ \(Decl' _ t m) -> checkType m t
         let unique = maximum (map nextAvailableUniqueDecl decls')
         let renamer = uniqueRenamer unique
         case runTCM renamer $ assumesIn assumes $ definesIn defines $ tcm of
@@ -147,7 +146,7 @@ simpleTest = TestCase $ do
 -- | The property that parsing and pretty-printing are inverse functions.
 prop_parsePprInverses :: WellTypedExpr -> Result
 prop_parsePprInverses (WellTypedExpr expr) =
-    let pprinted = render (pprExpr pprUnique expr)
+    let pprinted = prettyShow expr
         parsed = parse (parseExpr "%No-Name%" parseVar) "" pprinted
     in case parsed of
         Left err -> failed
