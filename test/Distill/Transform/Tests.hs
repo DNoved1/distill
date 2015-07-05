@@ -10,7 +10,9 @@ import Test.HUnit
 import Test.QuickCheck hiding (Result, reason)
 import Test.QuickCheck.Property
 
-import Distill.Expr
+import Distill.Expr.Representation
+import Distill.Expr.Syntax
+import Distill.Expr.TypeCheck
 import Distill.Expr.Tests hiding (tests)
 import Distill.TestUtil
 import Distill.Transform

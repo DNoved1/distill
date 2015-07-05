@@ -31,7 +31,6 @@ Refactoring
 * Better type-checking error type (aka, not a string).
 * inferType / checkType should return the elaborated term (without unknown
   type annotations).
-* Split Expr.hs into multiple sub-packages.
 
 Testing
 =======

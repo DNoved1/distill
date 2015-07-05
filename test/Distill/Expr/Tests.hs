@@ -13,7 +13,9 @@ import Test.QuickCheck.Gen
 import Test.QuickCheck.Property
 import Text.Parsec
 
-import Distill.Expr
+import Distill.Expr.Representation
+import Distill.Expr.Syntax
+import Distill.Expr.TypeCheck
 import Distill.TestUtil
 import Distill.UniqueName
 import Distill.UniqueName.Tests
