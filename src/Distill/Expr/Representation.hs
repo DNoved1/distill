@@ -1,7 +1,10 @@
 {-# LANGUAGE LambdaCase #-}
 
+-- | Pretty printing and parsing distilled expressions.
 module Distill.Expr.Representation
-    ( splitLet
+    (
+    -- * Utility Constructors/Destructors
+      splitLet
     , unsplitLet
     , splitForall
     , unsplitForall
@@ -17,30 +20,26 @@ module Distill.Expr.Representation
     , unsplitUnpack
     , ignoringSource
     , deleteSourceAnnotations
-    , pprExpr
-    , pprDecl
+    -- * Parsing
     , parseExpr
     , parseDecl
     , parseFile
     ) where
 
 import Control.Arrow hiding ((<+>))
-import Control.Monad
-import Data.Char (digitToInt)
 import Data.Functor.Foldable hiding (Mu)
 import Data.List (delete, intersperse, union)
-import Text.Parsec hiding (char)
+import Text.Parsec hiding (char, tokens)
+import qualified Text.Parsec as Parsec
 import Text.Parsec.String
+import Text.Parsec.Token hiding (colon, comma, parens)
+import qualified Text.Parsec.Token as Token
 import Text.PrettyPrint
 
 import Distill.Expr.Syntax
 import Distill.Util
 
-instance (Eq b, Pretty b) => Pretty (Expr' b) where
-    ppr = pprExpr ppr
-
-instance (Eq b, Pretty b) => Pretty (Decl' b) where
-    ppr = pprDecl ppr
+{-=== Utility Constructors/Destructors ======================================-}
 
 -- | Utility to split a let expression into a list of its binds and body.
 splitLet :: Expr' b -> ([(b, Expr' b)], Expr' b)
@@ -145,348 +144,410 @@ deleteSourceAnnotations = cata $ \case
     AnnotSourceF m _ -> m
     m                -> embed m
 
--- | Pretty print an expression.
-pprExpr :: Eq b => (b -> Doc) -> Expr' b -> Doc
-pprExpr pprVar = recurse . deleteSourceAnnotations
+{-=== Pretty printing =======================================================-}
+
+instance (Eq b, Pretty b) => Pretty (Expr' b) where
+    ppr = \case
+        Var x           -> ppr x
+        Star            -> char '*'
+        Let x m n       -> pprLet x m n
+        Forall x t s    -> pprForall x t s
+        Lambda x t m    -> pprLambda x t m
+        Apply m n       -> pprApply m n
+        Mu x t s        -> pprMu x t s
+        Fold m t        -> pprFold m t
+        Unfold m        -> pprUnfold m
+        UnitT           -> productL <> productR
+        UnitV           -> packL <> packR
+        Product x t s   -> pprProduct x t s
+        Pack x m n s    -> pprPack x m n s
+        Unpack m x y n  -> pprUnpack m x y n
+        Coproduct ts    -> pprCoproduct ts
+        Inject m i t    -> pprInject m i t
+        CaseOf m cs     -> pprCaseOf m cs
+        AnnotSource m _ -> ppr m
+        UnknownType     -> char '?'
+
+instance (Eq b, Pretty b) => Pretty (Decl' b) where
+    ppr (Decl' x t m) =
+        hang (text "define" <+> ppr x) 4
+            (vcat [colon <+> ppr t, equals <+> ppr m])
+
+fullstop        = char '.'
+productL        = text "(&"
+productR        = text "&)"
+productSep      = char '&'
+packL           = text "<|"
+packR           = text "|>"
+coproductL      = text "(|"
+coproductR      = text "|)"
+coproductSep    = char '|'
+arrow           = text "->"
+
+isAtomicExpr :: Expr' b -> Bool
+isAtomicExpr = ignoringSource >>> \case
+    Var{}       -> True
+    Star{}      -> True
+    Product{}   -> True
+    Pack{}      -> True
+    Coproduct{} -> True
+    _           -> False
+
+parensIf :: Bool -> Doc -> Doc
+parensIf cond = if cond then parens else id
+
+parensIfNotAtomic :: (Eq b, Pretty b) => Expr' b -> Doc
+parensIfNotAtomic m = (parensIf . not . isAtomicExpr) m (ppr m)
+
+seperatedBy :: [Doc] -> Doc -> Doc
+seperatedBy docs sep = hsep (intersperse sep docs)
+
+pprLet :: (Eq b, Pretty b) => b -> Expr' b -> Expr' b -> Doc
+pprLet x m n = text "let" <+> ppr x <+> equals <+> ppr m <+> text "in" $$ ppr n
+
+pprForall :: (Eq b, Pretty b) => b -> Type' b -> Type' b -> Doc
+pprForall x t s =
+    let (args, body) = splitForall (Forall x t s)
+        isDependent = snd $ (\f -> foldr f (freeVars body, []) args) $
+            \(x, t) (free, acc) ->
+                (freeVars t `union` delete x free, (x `elem` free):acc)
+        isAtomic = map (isAtomicExpr . snd) args
+        args' = map pprForallArg (zip3 args isDependent isAtomic)
+        body' = parensIfNotAtomic body
+    in (args' ++ [body']) `seperatedBy` arrow
   where
-    recurse = \case
-        Var x -> pprVar x
-        Star -> char '*'
-        Let x m n ->
-            hsep [text "let", pprVar x, equals, recurse m, text "in"]
-            $$ recurse n
-        forall@Forall{} ->
-            let (args, body) = splitForall forall
-                isDependent = snd $ foldr
-                    (\(x, t) (free, acc) ->
-                        (freeVars t `union` delete x free, (x `elem` free):acc))
-                    (freeVars body, [])
-                    args
-                isAtomic = map (isAtomicExpr . snd) args
-                args' = map pprForallArg (zip3 args isDependent isAtomic)
-                body' = (parensIf . not . isAtomicExpr) body (recurse body)
-            in hsep (intersperse arrow (args' ++ [body']))
-        lambda@Lambda{} ->
-            let (args, body) = splitLambda lambda
-                args' = map pprLambdaArg args
-                body' = nest 4 (recurse body)
-            in char '\\' <> hsep args' <> fullstop $$ body'
-        apply@Apply{} ->
-            let args = splitApply apply
-                isAtomic = map isAtomicExpr args
-                args' = map pprApplyArg (zip args isAtomic)
-            in hsep args'
-        Mu x t s ->
-            text "mu" <+> pprVar x <+> colon <+> recurse t <> fullstop
-            <+> recurse s
-        Fold m t ->
-            let m' = (parensIf . not . isAtomicExpr) m (recurse m)
-                t' = (parensIf . not . isAtomicExpr) t (recurse t)
-            in text "fold" <+> m' <+> t'
-        Unfold m ->
-            let m' = (parensIf . not . isAtomicExpr) m (recurse m)
-            in text "unfold" <+> m'
-        UnitT -> productL <> productR
-        UnitV -> packL <> packR
-        product@Product{} ->
-            let (args, body) = splitProduct product
-                isDependent = snd $ (\f -> foldr f (freeVars body, []) args) $
-                    \(x, t) (free, acc) ->
-                        (freeVars t `union` delete x free, (x `elem` free):acc)
-                args' = flip map (zip args isDependent) $ \((x, t), dep) ->
-                    if dep
-                        then pprVar x <+> colon <+> recurse t
-                        else recurse t
-                body' = recurse body
-                innards = hsep (intersperse productSep (args' ++ [body']))
-            in productL <+> innards <+> productR
-        pack@Pack{} ->
-            let (head@(x, m), body, tail@(n, t)) = splitPack pack
-                nameNecessary = packNameNecessary head body tail
-                typeNecessary = packTypeNecessary head body tail
-                parts = (x, m, undefined) : body ++ [(undefined, n, t)]
-                parts' = map pprPackPart (zip3 parts nameNecessary typeNecessary)
-                innards = hsep (punctuate comma parts')
-            in packL <> innards <> packR
-        unpack@Unpack{} ->
-            let (head, names, tail) = splitUnpack unpack
-                head' = recurse head
-                names' = hsep (punctuate comma (map pprVar names))
-                tail' = nest 4 (recurse tail)
-            in text "unpack" <+> head' <+> equals <+> packL <> names' <> packR
-                $$ tail'
-        Coproduct ts ->
-            let body = hsep (intersperse coproductSep (map recurse ts))
-            in coproductL <+> body <+> coproductR
-        Inject m i t ->
-            let m' = (parensIf . not . isAtomicExpr) m (recurse m)
-                i' = int i
-                t' = (parensIf . not . isAtomicExpr) t (recurse t)
-            in text "inject" <+> m' <+> i' <+> t'
-        CaseOf m cs ->
-            let m' = (parensIf . not . isAtomicExpr) m (recurse m)
-                cs' = flip map cs $ \(x, c) ->
-                    nest 4 (char '|' <+> pprVar x <+> arrow <+> recurse c)
-            in vcat ((text "caseof" <+> m') : cs')
-        AnnotSource m _ -> recurse m
-        UnknownType -> char '?'
-    parensIf cond = if cond then parens else id
     pprForallArg ((x, t), dependent, atomic) =
         let wrapper = parensIf (not atomic || dependent)
-            body = if dependent
-                then pprVar x <+> colon <+> recurse t
-                else recurse t
+            body = (if dependent then ppr x <+> colon else empty) <+> ppr t
         in wrapper body
-    pprLambdaArg (x, t) = parens $ pprVar x <+> colon <+> recurse t
-    pprApplyArg (m, atomic) =
-        let wrapper = parensIf (not atomic)
-        in wrapper (recurse m)
-    packNameNecessary head body tail =
-        let bodyNameNecessary = (\f -> foldr f (freeVars (snd tail), []) body)
-                $ \(x, _, t) (free, acc) ->
-                    (freeVars t `union` delete x free, (x `elem` free):acc)
-            headNameNecessary = fst head `elem` fst bodyNameNecessary
-        in headNameNecessary : snd bodyNameNecessary ++ [False]
-    packTypeNecessary head body tail =
-        let bodyTypeNecessary = (\f -> foldl f ([fst head], []) body)
-                $ \(defined, acc) (x, _, t) ->
-                    (x:defined, (any (`elem` defined) (freeVars t)):acc)
-            tailTypeNecessary = any (`elem` fst bodyTypeNecessary) (snd tail)
-        in False : snd bodyTypeNecessary ++ [tailTypeNecessary]
-    pprPackPart ((x, m, t), pprName, pprType) =
-            (if pprName then pprVar x <+> equals else empty)
-        <+> recurse m
-        <+> (if pprType then colon <+> recurse t else empty)
-    isAtomicExpr = ignoringSource >>> \case
-        Var{}       -> True
-        Star{}      -> True
-        Product{}   -> True
-        Pack{}      -> True
-        Coproduct{} -> True
-        _           -> False
-    fullstop = char '.'
-    productL = text "(&"
-    productR = text "&)"
-    productSep = char '&'
-    packL = text "<|"
-    packR = text "|>"
-    coproductL = text "(|"
-    coproductR = text "|)"
-    coproductSep = char '|'
-    arrow = text "->"
 
--- | Pretty-print a declaration.
-pprDecl :: Eq b => (b -> Doc) -> Decl' b -> Doc
-pprDecl pprVar (Decl' x t m) =
-    text "define" <+> pprVar x $$
-    nest 4 (colon <+> pprExpr pprVar t) $$
-    nest 4 (equals <+> pprExpr pprVar m)
-
--- | Parse an expression. The first argument is the name to give to
--- non-dependent function types.
-parseExpr :: b -> Parser b -> Parser (Expr' b)
-parseExpr defaultName parseVar' = recurse
+pprLambda :: (Eq b, Pretty b) => b -> Type' b -> Expr' b -> Doc
+pprLambda x t m =
+    let (args, body) = splitLambda (Lambda x t m)
+        args' = map pprLambdaArg args
+    in char '\\' <> hsep args' <> fullstop $$ nest 4 (ppr body)
   where
-    recurse = parseArrowed
-    parseAtomic = withSource $ choice
-        [ try (parseParens recurse)
-        , try $ do
-            literal "(&"
-            factors <- flip sepBy (literal "&") $ choice
-                [ try $ do
-                    x <- parseVar
-                    literal ":"
-                    t <- recurse
-                    return (x, t)
-                , do
-                    t <- recurse
-                    return (defaultName, t)
-                ]
-            literal "&)"
-            case length factors of
-                0 -> return UnitT
-                1 -> fail "Product must have 0, 2, or more factors."
-                _ -> do
-                    let tail' = snd (last factors)
-                    let body' = init factors
-                    return (unsplitProduct body' tail')
-        , do
-            literal "(|"
-            summands <- sepBy recurse (literal "|")
-            literal "|)"
-            return (Coproduct summands)
-        , do
-            literal "<|"
-            parts <- flip sepBy (literal ",") $ choice
-                [ try $ do
-                    x <- parseVar
-                    literal "="
-                    m <- recurse
-                    literal ":"
-                    t <- recurse
-                    return (x, m, t)
-                , try $ do
-                    x <- parseVar
-                    literal "="
-                    m <- recurse
-                    return (x, m, UnknownType)
-                , try $ do
-                    m <- recurse
-                    literal ":"
-                    t <- recurse
-                    return (defaultName, m, t)
-                , do
-                    m <- recurse
-                    return (defaultName, m, UnknownType)
-                ]
-            literal "|>"
-            case length parts of
-                0 -> return UnitV
-                1 -> fail "Pack must have 0, 2, or more parts."
-                _ -> do
-                    let head' = (\(x, m, _) -> (x, m)) (head parts)
-                    let tail' = (\(_, m, t) -> (m, t)) (last parts)
-                    let body' = (init . tail) parts
-                    return (unsplitPack head' body' tail')
-        , pure Star <* literal "*"
-        , Var <$> parseVar
+    pprLambdaArg (x, t) = parens (ppr x <+> colon <+> ppr t)
+
+pprApply :: (Eq b, Pretty b) => Expr' b -> Expr' b -> Doc
+pprApply m n = hsep (map parensIfNotAtomic (splitApply (Apply m n)))
+
+pprMu :: (Eq b, Pretty b) => b -> Type' b -> Type' b -> Doc
+pprMu x t s = text "mu" <+> ppr x <+> colon <+> ppr t <> fullstop <+> ppr s
+
+pprFold :: (Eq b, Pretty b) => Expr' b -> Type' b -> Doc
+pprFold m t = text "fold" <+> ppr m <+> text "into" <+> ppr t
+
+pprUnfold :: (Eq b, Pretty b) => Expr' b -> Doc
+pprUnfold m = text "unfold" <+> ppr m
+
+pprProduct :: (Eq b, Pretty b) => b -> Type' b -> Type' b -> Doc
+pprProduct x t s =
+    let (args, body) = splitProduct (Product x t s)
+        isDependent = snd $ (\f -> foldr f (freeVars body, []) args) $
+            \(x, t) (free, acc) ->
+                (freeVars t `union` delete x free, (x `elem` free):acc)
+        args' = map pprFactor (zip args isDependent)
+        body' = ppr body
+        innards = (args' ++ [body']) `seperatedBy` productSep
+    in productL <+> innards <+> productR
+  where
+    pprFactor ((x, t), dep) = (if dep then ppr x <+> colon else empty) <+> ppr t
+
+pprPack :: (Eq b, Pretty b) => b -> Expr' b -> Expr' b -> Type' b -> Doc
+pprPack x m n s =
+    let (head, body, tail) = splitPack (Pack x m n s)
+        nameNecessary = packNameNecessary head body tail
+        typeNecessary = packTypeNecessary head body tail
+        parts = extendHead head : body ++ [extendTail tail]
+        parts' = map pprFactor (zip3 parts nameNecessary typeNecessary)
+        innards = hsep (punctuate comma parts')
+    in packL <> innards <> packR
+  where
+    -- This is a bit tricky, but note that the type of head is never shown,
+    -- and the name of the tail is also never shown.
+    extendHead (x, m) = (x, m, undefined)
+    extendTail (m, t) = (undefined, m, t)
+    packNameNecessary (x, _) body (_, t) =
+        let (free, body') = (\f -> foldr f (freeVars t, []) body) $
+                \(x, _, t) (free, acc) ->
+                    (freeVars t `union` delete x free, (x `elem` free):acc)
+            head' = x `elem` free
+        in head' : body' ++ [False]
+    packTypeNecessary (x, _) body (_, t) =
+        let (defined, body') = (\f -> foldl f ([x], []) body) $
+                \(defined, acc) (x, _, t) ->
+                    (x:defined, (any (`elem` defined) (freeVars t)):acc)
+            tail' = any (`elem` defined) (freeVars t)
+        in False : body' ++ [tail']
+    pprFactor ((x, m, t), pprName, pprType) =
+        (if pprName then ppr x <+> equals else empty) <+> ppr m <+>
+        (if pprType then colon <+> ppr t else empty)
+
+pprUnpack :: (Eq b, Pretty b) => Expr' b -> b -> b -> Expr' b -> Doc
+pprUnpack m x y n =
+    let (head, names, tail) = splitUnpack (Unpack m x y n)
+        names' = hsep (punctuate comma (map ppr names))
+    in text "unpack" <+> ppr head <+> equals
+        <+> packL <> names' <> packR <+> text "in"
+        $$ nest 4 (ppr tail)
+
+pprCoproduct :: (Eq b, Pretty b) => [Type' b] -> Doc
+pprCoproduct ts =
+    let innards = map ppr ts `seperatedBy` coproductSep
+    in coproductL <+> innards <+> coproductR
+
+pprInject :: (Eq b, Pretty b) => Expr' b -> Int -> Type' b -> Doc
+pprInject m i t = text "inject" <+> ppr m <+> int i <+> text "into" <+> ppr t
+
+pprCaseOf :: (Eq b, Pretty b) => Expr' b -> [(b, Expr' b)] -> Doc
+pprCaseOf m cs =
+    let cs' = map (\(x, c) -> char '|' <+> ppr x <+> arrow <+> ppr c) cs
+    in text "caseof" <+> ppr m $$ nest 4 (vcat cs')
+
+{-=== Parsing ===============================================================-}
+
+-- | Parse an expression.
+parseExpr :: Parser (Expr' String)
+parseExpr = parseArrowed
+  where
+    parseAtomic = choice
+        [ parseVar
+        , parseStar
+        , try parseProduct
+        , try parseCoproduct
+        , Token.parens tokens parseExpr
+        , parsePack
         ]
-    parseBasic = withSource $ choice
+    parseBasic = choice $
         [ parseAtomic
-        , do
-            literal "let"
-            x <- parseVar
-            literal "="
-            m <- recurse
-            literal "in"
-            n <- recurse
-            return (Let x m n)
-        , do
-            literal "\\"
-            args <- many1 parseArg
-            literal "."
-            body <- recurse
-            return (unsplitLambda args body)
-        , do
-            literal "mu"
-            x <- parseVar
-            literal ":"
-            t <- recurse
-            literal "."
-            s <- recurse
-            return (Mu x t s)
-        , do
-            literal "fold"
-            m <- parseAtomic
-            t <- parseAtomic
-            return (Fold m t)
-        , do
-            literal "unfold"
-            m <- parseAtomic
-            return (Unfold m)
-        , do
-            literal "unpack"
-            m <- recurse
-            literal "="
-            literal "<|"
-            parts <- sepBy parseVar (literal ",")
-            literal "|>"
-            n <- recurse
-            if length parts < 2
-                then fail $ "Unpackings can only be applied to products with "
-                         ++ "at least two factors."
-                else return (unsplitUnpack m parts n)
-        , do
-            literal "inject"
-            m <- parseAtomic
-            i <- parseNat
-            t <- parseAtomic
-            return (Inject m i t)
-        , do
-            literal "caseof"
-            m <- recurse
-            cs <- many $ do
-                literal "|"
-                x <- parseVar
-                literal "->"
-                c <- recurse
-                return (x, c)
-            return (CaseOf m cs)
+        , parseLet
+        , parseLambda
+        , parseMu
+        , parseFold
+        , parseUnfold
+        , parseUnpack
+        , parseInject
+        , parseCaseof
         ]
-    parseApplied = withSource $ do
+    parseApplied = label' "application" $ withSource $ do
         args <- many1 parseBasic
         return (unsplitApply args)
-    parseArrowed = withSource $ do
-        argsAndBody <- flip sepBy1 (literal "->") $ choice
+    parseArrowed =  label' "forall type" $ withSource $ do
+        argsAndBody <- flip sepBy1 (symbol tokens "->") $ choice
             [ try parseArg -- Uses backtracking because it starts with '(',
                            -- just like a parenthesized atomic expression.
-            , (,) defaultName <$> parseApplied
+            , (,) "%No-Name%" <$> parseApplied
             ]
         return $ if null (tail argsAndBody)
             then snd (head argsAndBody)
             else unsplitForall (init argsAndBody) (snd (last argsAndBody))
-    literal = parseLiteral
-    parseVar = fixParseVar parseVar'
-    parseArg = parseParens $ do
-        x <- parseVar
-        literal ":"
-        t <- recurse
-        return (x, t)
-    withSource p = do
-        start <- getPosition
-        expr <- p
-        end <- getPosition
-        return $ AnnotSource expr $ SourceLoc
-            { sourceFile = sourceName start
-            , sourceStartCol = sourceColumn start
-            , sourceStartLine = sourceLine start
-            , sourceEndCol = sourceColumn end
-            , sourceEndLine = sourceLine end
-            }
 
 -- | Parse a declaration.
-parseDecl :: b -> Parser b -> Parser (Decl' b)
-parseDecl defaultName parseVar' = do
-    parseLiteral "define"
-    x <- fixParseVar parseVar'
-    parseLiteral ":"
-    t <- parseExpr defaultName parseVar'
-    parseLiteral "="
-    m <- parseExpr defaultName parseVar'
+parseDecl :: Parser (Decl' String)
+parseDecl = label' "definition" $ do
+    reserved tokens "define"
+    x <- identifier tokens
+    symbol tokens ":"
+    t <- parseExpr
+    symbol tokens "="
+    m <- parseExpr
     return (Decl' x t m)
 
 -- | Parse an entire file full of declarations.
-parseFile :: b -> Parser b -> Parser [Decl' b]
-parseFile defaultName parseVar' =
-    parseWhitespace *> many (parseDecl defaultName parseVar') <* eof
+parseFile :: Parser [Decl' String]
+parseFile = whiteSpace tokens >> many parseDecl <* eof
 
--- | "Fix" a variable parser so that it won't pick up reserved words and will
--- automatically parse whitespace after itself like all the other parsers.
-fixParseVar :: Parser b -> Parser b
-fixParseVar parseVar' = try $ do
-    -- Uses backtracking because we don't want the variable parser to
-    -- pick up reserved words, such as 'let'.
-    isReserved <- optionMaybe $ try (string "let")
-                            <|> try (string "mu")
-                            <|> try (string "fold")
-                            <|> try (string "unfold")
-                            <|> try (string "define")
-    case isReserved of
-        Just reserved -> fail $ "'" ++ reserved ++ "' is a reserved word."
-        Nothing -> parseVar' <* parseWhitespace
+tokens :: TokenParser ()
+tokens = makeTokenParser $ LanguageDef
+    { commentStart = ""
+    , commentEnd = ""
+    , commentLine = "#"
+    , nestedComments = False
+    , identStart = letter
+    , identLetter = alphaNum <|> Parsec.char '$'
+    , opStart = fail "No operators defined."
+    , opLetter = fail "No operators defined"
+    , reservedNames =
+        [ "caseof"
+        , "define"
+        , "fold"
+        , "in"
+        , "inject"
+        , "into"
+        , "let"
+        , "mu"
+        , "unfold"
+        , "unpack"
+        ]
+    , reservedOpNames = []
+    , caseSensitive = True
+    }
 
-parseLiteral :: String -> Parser String
-parseLiteral str = string str <* parseWhitespace
+label' :: String -> Parser a -> Parser a
+label' = flip label
 
-parseWhitespace :: Parser ()
-parseWhitespace = void (many (void (oneOf " \t\n") <|> parseComment))
-  where
-    parseComment = void (string "#" >> many (noneOf "\n") >> string "\n")
+parseVar :: Parser (Expr' String)
+parseVar = label' "variable" $ withSource $ do
+    x <- identifier tokens
+    return (Var x)
 
-parseParens :: Parser a -> Parser a
-parseParens = between (parseLiteral "(") (parseLiteral ")")
+parseStar :: Parser (Expr' String)
+parseStar = label' "star type" $ withSource $ do
+    symbol tokens "*"
+    return Star
 
-parseNat :: Parser Int
-parseNat = do
-    digits <- many1 digit
-    return (foldl1 (\acc d -> acc * 10 + d) (map digitToInt digits))
+parseLet :: Parser (Expr' String)
+parseLet = label' "let expression" $ withSource $ do
+    reserved tokens "let"
+    x <- identifier tokens
+    symbol tokens "="
+    m <- parseExpr
+    reserved tokens "in"
+    n <- parseExpr
+    return (Let x m n)
+
+parseLambda :: Parser (Expr' String)
+parseLambda = label' "lambda" $ withSource $ do
+    symbol tokens "\\"
+    parameters <- many1 parseArg
+    symbol tokens "."
+    body <- parseExpr
+    return (unsplitLambda parameters body)
+
+parseMu :: Parser (Type' String)
+parseMu = label' "mu type" $ withSource $ do
+    reserved tokens "mu"
+    x <- identifier tokens
+    symbol tokens ":"
+    t <- parseExpr
+    symbol tokens "."
+    s <- parseExpr
+    return (Mu x t s)
+
+parseFold :: Parser (Expr' String)
+parseFold = label' "fold expression" $ withSource $ do
+    reserved tokens "fold"
+    m <- parseExpr
+    reserved tokens "into"
+    t <- parseExpr
+    return (Fold m t)
+
+parseUnfold :: Parser (Expr' String)
+parseUnfold = label' "unfold expression" $ withSource $ do
+    reserved tokens "unfold"
+    m <- parseExpr
+    return (Unfold m)
+
+parseProduct :: Parser (Type' String)
+parseProduct = label' "product type" $ withSource $ do
+    symbol tokens "(&"
+    factors <- flip sepBy (symbol tokens "&") $ choice
+        [ try $ do
+            x <- identifier tokens
+            symbol tokens ":"
+            t <- parseExpr
+            return (x, t)
+        , do
+            t <- parseExpr
+            return ("%No-Name%", t)
+        ]
+    symbol tokens "&)"
+    case length factors of
+        0 -> return UnitT
+        1 -> fail "Product must have 0, 2, or more factors."
+        _ -> do
+            let tail' = snd (last factors)
+            let body' = init factors
+            return (unsplitProduct body' tail')
+
+parsePack :: Parser (Expr' String)
+parsePack = label' "product expression" $ withSource $ do
+    symbol tokens "<|"
+    parts <- flip sepBy (symbol tokens ",") $ do
+        (x, m) <- choice
+            [ try $ do
+                x <- identifier tokens
+                symbol tokens "="
+                m <- parseExpr
+                return (x, m)
+            , do
+                m <- parseExpr
+                return ("%No-Name%", m)
+            ]
+        t <- option UnknownType $ do
+            symbol tokens ":"
+            parseExpr
+        return (x, m, t)
+    symbol tokens "|>"
+    case length parts of
+        0 -> return UnitV
+        1 -> fail "Pack must have 0, 2, or more parts."
+        _ -> do
+            let head' = (\(x, m, _) -> (x, m)) (head parts)
+            let tail' = (\(_, m, t) -> (m, t)) (last parts)
+            let body' = (init . tail) parts
+            return (unsplitPack head' body' tail')
+
+parseUnpack :: Parser (Expr' String)
+parseUnpack = label' "unpack expression" $ withSource $ do
+    reserved tokens "unpack"
+    m <- parseExpr
+    symbol tokens "="
+    symbol tokens "<|"
+    parts <- sepBy (identifier tokens) (symbol tokens ",")
+    symbol tokens "|>"
+    reserved tokens "in"
+    n <- parseExpr
+    if length parts < 2
+        then fail $ "Unpackings can only be applied to products with "
+                 ++ "at least two factors."
+        else return (unsplitUnpack m parts n)
+
+parseCoproduct :: Parser (Type' String)
+parseCoproduct = label' "coproduct type" $ withSource $ do
+    symbol tokens "(|"
+    summands <- sepBy parseExpr (symbol tokens "|")
+    symbol tokens "|)"
+    return (Coproduct summands)
+
+parseInject :: Parser (Expr' String)
+parseInject = label' "inject expression" $ withSource $ do
+    reserved tokens "inject"
+    m <- parseExpr
+    i <- fromIntegral <$> natural tokens
+    reserved tokens "into"
+    t <- parseExpr
+    return (Inject m i t)
+
+parseCaseof :: Parser (Expr' String)
+parseCaseof = label' "case analysis" $ withSource $ do
+    reserved tokens "caseof"
+    m <- parseExpr
+    cs <- many $ do
+        symbol tokens "|"
+        x <- identifier tokens
+        symbol tokens "->"
+        c <- parseExpr
+        return (x, c)
+    return (CaseOf m cs)
+
+parseArg :: Parser (String, Type' String)
+parseArg = Token.parens tokens $ do
+    x <- identifier tokens
+    symbol tokens ":"
+    t <- parseExpr
+    return (x, t)
+
+withSource :: Parser (Expr' b) -> Parser (Expr' b)
+withSource p = do
+    start <- getPosition
+    expr <- p
+    end <- getPosition
+    return $ AnnotSource expr $ SourceLoc
+        { sourceFile = sourceName start
+        , sourceStartCol = sourceColumn start
+        , sourceStartLine = sourceLine start
+        , sourceEndCol = sourceColumn end
+        , sourceEndLine = sourceLine end
+        }

@@ -53,11 +53,11 @@ define Nat
 
 define zero
     : Nat
-    = fold (\(r : *) (zero : r) (succ : Nat -> r). zero) Nat
+    = fold \(r : *) (zero : r) (succ : Nat -> r). zero into Nat
 
 define succ
     : Nat -> Nat
-    = \(n : Nat). fold (\(r : *) (zero : r) (succ : Nat -> r). succ n) Nat
+    = \(n : Nat). fold \(r : *) (zero : r) (succ : Nat -> r). succ n into Nat
 
 define add
     : Nat -> Nat -> Nat
@@ -70,13 +70,15 @@ define List
 
 define nil
     : (a : *) -> List a
-    = \(a : *). fold (\(r : *) (nil : r) (cons : a -> List a -> r). nil) (List a)
+    = \(a : *).
+        fold \(r : *) (nil : r) (cons : a -> List a -> r). nil
+        into List a
 
 define cons
     : (a : *) -> a -> List a -> List a
-    = \(a : *) (head : a) (tail : List a). fold
-        (\(r : *) (nil : r) (cons : a -> List a -> r). cons head tail)
-        (List a)
+    = \(a : *) (head : a) (tail : List a).
+        fold \(r : *) (nil : r) (cons : a -> List a -> r). cons head tail
+        into List a
 
 define append
     : (a : *) -> List a -> List a -> List a

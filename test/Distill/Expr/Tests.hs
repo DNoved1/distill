@@ -131,7 +131,7 @@ simpleTest = TestCase $ do
     let fileName = "./test/simple.distill"
     withFile fileName ReadMode $ \file -> do
         contents <- hGetContents file
-        let parsed = parse parseExprFile fileName contents
+        let parsed = parse parseFile fileName contents
         decls <- case parsed of
             Left err -> assertFalse (show err)
             Right decls -> return decls
@@ -149,7 +149,7 @@ simpleTest = TestCase $ do
 prop_parsePprInverses :: WellTypedExpr -> Result
 prop_parsePprInverses (WellTypedExpr expr) =
     let pprinted = prettyShow expr
-        parsed = parse (parseExpr "%No-Name%" parseVar) "" pprinted
+        parsed = parse parseExpr "" pprinted
     in case parsed of
         Left err -> failed
             { reason = "Failed to parse pretty-printed expr.\n"
@@ -173,7 +173,6 @@ prop_parsePprInverses (WellTypedExpr expr) =
                         }
                     Right () -> succeeded
   where
-    parseVar = many1 (alphaNum <|> char '$')
     introSpiel pprinted = "\tStarted with the expression:\n"
                        ++ show expr ++ "\n"
                        ++ "\tWhich was pretty-printed as:\n"

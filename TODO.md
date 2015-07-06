@@ -31,8 +31,11 @@ Refactoring
 * Better type-checking error type (aka, not a string).
 * inferType / checkType should return the elaborated term (without unknown
   type annotations).
+* TODO, allow 1-products/sums - 1 products encoded as tuple of A and Unit,
+  1 sums as singleton list.
 
 Testing
 =======
 * More test-cases for 'reasonable' programs.
 * Program coverage via hpc.
+* Add product and coproduct expression generators.
