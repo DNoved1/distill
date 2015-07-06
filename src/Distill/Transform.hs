@@ -145,6 +145,10 @@ aNormalizeExpr ctor = aNormalizeOuter
                 c' <- aNormalizeOuter c
                 return (x, c')
             return (mlets, CaseOf m' cs')
+        CaseOfFalse m t -> do
+            (mlets, m') <- aNormalizeInner m
+            (tlets, t') <- aNormalizeInner t
+            return (mlets ++ tlets, CaseOfFalse m' t')
         AnnotSource{} -> unstrippedError
         UnknownType{} -> unstrippedError
     createName = ctor <$> (get <* modify succ)

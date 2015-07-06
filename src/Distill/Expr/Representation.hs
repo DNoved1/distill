@@ -24,6 +24,7 @@ module Distill.Expr.Representation
     , parseExpr
     , parseDecl
     , parseFile
+    , reservedWords
     ) where
 
 import Control.Arrow hiding ((<+>))
@@ -165,6 +166,7 @@ instance (Eq b, Pretty b) => Pretty (Expr' b) where
         Coproduct ts    -> pprCoproduct ts
         Inject m i t    -> pprInject m i t
         CaseOf m cs     -> pprCaseOf m cs
+        CaseOfFalse m t -> text "explode" <+> ppr m <+> text "into" <+> ppr t
         AnnotSource m _ -> ppr m
         UnknownType     -> char '?'
 
@@ -328,7 +330,8 @@ parseExpr = parseArrowed
         , parseUnfold
         , parseUnpack
         , parseInject
-        , parseCaseof
+        , parseCaseOf
+        , parseCaseOfFalse
         ]
     parseApplied = label' "application" $ withSource $ do
         args <- many1 parseBasic
@@ -358,6 +361,21 @@ parseDecl = label' "definition" $ do
 parseFile :: Parser [Decl' String]
 parseFile = whiteSpace tokens >> many parseDecl <* eof
 
+reservedWords :: [String]
+reservedWords =
+    [ "caseof"
+    , "define"
+    , "explode"
+    , "fold"
+    , "in"
+    , "inject"
+    , "into"
+    , "let"
+    , "mu"
+    , "unfold"
+    , "unpack"
+    ]
+
 tokens :: TokenParser ()
 tokens = makeTokenParser $ LanguageDef
     { commentStart = ""
@@ -368,18 +386,7 @@ tokens = makeTokenParser $ LanguageDef
     , identLetter = alphaNum <|> Parsec.char '$'
     , opStart = fail "No operators defined."
     , opLetter = fail "No operators defined"
-    , reservedNames =
-        [ "caseof"
-        , "define"
-        , "fold"
-        , "in"
-        , "inject"
-        , "into"
-        , "let"
-        , "mu"
-        , "unfold"
-        , "unpack"
-        ]
+    , reservedNames = reservedWords
     , reservedOpNames = []
     , caseSensitive = True
     }
@@ -520,8 +527,8 @@ parseInject = label' "inject expression" $ withSource $ do
     t <- parseExpr
     return (Inject m i t)
 
-parseCaseof :: Parser (Expr' String)
-parseCaseof = label' "case analysis" $ withSource $ do
+parseCaseOf :: Parser (Expr' String)
+parseCaseOf = label' "case analysis" $ withSource $ do
     reserved tokens "caseof"
     m <- parseExpr
     cs <- many $ do
@@ -531,6 +538,14 @@ parseCaseof = label' "case analysis" $ withSource $ do
         c <- parseExpr
         return (x, c)
     return (CaseOf m cs)
+
+parseCaseOfFalse :: Parser (Expr' String)
+parseCaseOfFalse = label' "explosion" $ withSource $ do
+    reserved tokens "explode"
+    m <- parseExpr
+    reserved tokens "into"
+    t <- parseExpr
+    return (CaseOfFalse m t)
 
 parseArg :: Parser (String, Type' String)
 parseArg = Token.parens tokens $ do

@@ -9,7 +9,6 @@ Functionality
   * ~~Coproduct~~
 * Add max-depth to normalization so that type-checking doesn't result in the
   program hanging.
-* Special case analysis for empty type (principle of explosion).
 
 Refactoring
 ===========

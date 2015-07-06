@@ -43,6 +43,8 @@ data Expr' b
     | Coproduct [Type' b]
     | Inject (Expr' b) Int (Type' b)
     | CaseOf (Expr' b) [(b, Expr' b)]
+    -- | Case analysis on ⊥, where you specify what type you want.
+    | CaseOfFalse (Expr' b) (Type' b)
     -- These are only present during parsing and type-checking.
     -- | Source location annotation.
     | AnnotSource (Expr' b) SourceLoc
@@ -77,6 +79,7 @@ data Expr'F b a
     | CoproductF [a]
     | InjectF a Int a
     | CaseOfF a [(b, a)]
+    | CaseOfFalseF a a
     | AnnotSourceF a SourceLoc
     | UnknownTypeF
   deriving (Foldable, Functor, Traversable)
@@ -102,6 +105,7 @@ instance RS.Foldable (Expr' b) where
         Coproduct ts    -> CoproductF ts
         Inject m i t    -> InjectF m i t
         CaseOf m cs     -> CaseOfF m cs
+        CaseOfFalse m t -> CaseOfFalseF m t
         AnnotSource m s -> AnnotSourceF m s
         UnknownType     -> UnknownTypeF
 
@@ -124,6 +128,7 @@ instance RS.Unfoldable (Expr' b) where
         CoproductF ts    -> Coproduct ts
         InjectF m i t    -> Inject m i t
         CaseOfF m cs     -> CaseOf m cs
+        CaseOfFalseF m t -> CaseOfFalse m t
         AnnotSourceF m s -> AnnotSource m s
         UnknownTypeF     -> UnknownType
 

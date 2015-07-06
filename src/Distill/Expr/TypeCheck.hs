@@ -192,6 +192,15 @@ inferType expr = case expr of
             ++ "While checking all case branches have the same type ("
             ++ prettyShow resultType ++ ").")
         return resultType
+    CaseOfFalse m t -> do
+        inferType m >>= normalize >>= \case
+            Coproduct [] -> return ()
+            incorrect -> throwError $
+                "The principle of explosion can only be applied to the empty "
+                ++ "coproduct; was supplied instead with '"
+                ++ prettyShow incorrect ++ "'."
+        checkType t Star
+        return t
     AnnotSource m s ->
         catchError
             (inferType m)
@@ -268,6 +277,9 @@ checkEqual expr1 expr2 = do
                     nest 4 (ppr expr2)
                 forM_ (zip cs ds) $ \((x, m), (y, n)) ->
                     checkEqual' m =<< renameVar y x n
+            (CaseOfFalse m t, CaseOfFalse n s) -> do
+                checkEqual' m n
+                checkEqual' t s
             (m, n) -> throwError $ render $
                 text "Cannot make the following two types equal:" $$
                 nest 4 (ppr m) $$
@@ -361,6 +373,7 @@ renumber' ctor start rebound =
                 x' <- gensym x
                 c' <- local ((x,x'):) c
                 return (x', c'))
+        CaseOfFalseF m t -> CaseOfFalse <$> m <*> t
         AnnotSourceF m s -> AnnotSource <$> m <*> pure s
         UnknownTypeF     -> return UnknownType
     gensym old = ctor old <$> getAndModify succ

@@ -5,6 +5,7 @@ module Distill.UniqueName.Tests
 import Control.Monad
 import Test.QuickCheck
 
+import Distill.Expr.Representation
 import Distill.UniqueName
 
 -- | Generate an arbitrary upto three-letter unique name.
@@ -15,5 +16,3 @@ arbitraryUniqueName s = do
     if name `elem` reservedWords
         then arbitraryUniqueName s
         else return (succ s, UniqueName name s)
-  where
-    reservedWords = ["let", "mu", "fold", "unfold", "define"]
